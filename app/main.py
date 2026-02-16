@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import engine, Base
-from app.routers import auth, exams
+from app.routers import auth, exams, scan
 
 settings = get_settings()
 
@@ -39,6 +39,7 @@ app.mount(f"/{settings.UPLOAD_DIR}", StaticFiles(directory=settings.UPLOAD_DIR),
 # Include routers
 app.include_router(auth.router)
 app.include_router(exams.router)
+app.include_router(scan.router)
 
 
 @app.get("/")

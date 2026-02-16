@@ -1,7 +1,7 @@
 """Pydantic schemas for request/response validation."""
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, List
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -20,6 +20,7 @@ class UserResponse(BaseModel):
     id: int
     email: str
     is_subscribed: bool
+    subscription_plan: Optional[str]
     created_at: datetime
 
     class Config:
@@ -41,21 +42,28 @@ class LoginRequest(BaseModel):
 
 
 # --- Exam Schemas ---
-class AnswerKeyItem(BaseModel):
-    """Single answer key entry."""
+# Answer key as JSON: {"1": 0, "2": 2, "3": 1, ...} question_no -> correct_option (0-3)
+AnswerKeyDict = Dict[str, int]
+
+
+class AnswerKeySet(BaseModel):
+    """Answer key for one set (e.g., ক, খ). answers: question_no (str) -> correct_option (0-3)."""
 
     set_code: str = Field(..., min_length=1, max_length=10)
-    question_no: int = Field(..., ge=1, le=60)
-    correct_option: int = Field(..., ge=0, le=3)
+    answers: Dict[str, int] = Field(
+        ...,
+        description='{"1": 0, "2": 2, "3": 1, ...}',
+        examples=[{"1": 2, "2": 0, "3": 1}],
+    )
 
 
 class ExamCreate(BaseModel):
-    """Schema for creating an exam with answer key."""
+    """Schema for creating an exam with answer keys."""
 
-    name: str = Field(..., min_length=1, max_length=255)
+    title: str = Field(..., min_length=1, max_length=255)
     subject_code: str = Field(..., min_length=1, max_length=50)
     total_questions: int = Field(default=60, ge=1, le=100)
-    answer_key: list[AnswerKeyItem] = Field(..., min_length=1)
+    answer_keys: list[AnswerKeySet] = Field(..., min_length=1)
 
 
 class ExamResponse(BaseModel):
@@ -63,10 +71,10 @@ class ExamResponse(BaseModel):
 
     id: int
     teacher_id: int
-    name: str
+    title: str
     subject_code: str
     total_questions: int
-    created_at: datetime
+    date_created: datetime
 
     class Config:
         from_attributes = True
@@ -79,11 +87,9 @@ class ScanResultResponse(BaseModel):
     roll_number: str
     set_code: str
     marks_obtained: int
-    wrong_answers: int
+    wrong_answers: List[int]
     percentage: float
-    class_code: str
-    subject_code: str
-    answers: list[int]
+    answers: List[int]
     success: bool
     message: str = ""
 
@@ -96,9 +102,9 @@ class ResultResponse(BaseModel):
     roll_number: str
     set_code: str
     marks_obtained: int
-    wrong_answers: int
+    wrong_answers: List[int]
     percentage: float
-    uploaded_image_url: Optional[str]
+    image_url: Optional[str]
     created_at: datetime
 
     class Config:

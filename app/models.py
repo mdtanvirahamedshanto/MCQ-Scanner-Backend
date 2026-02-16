@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -24,6 +25,7 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
     is_subscribed = Column(Boolean, default=False)
+    subscription_plan = Column(String(50), nullable=True)  # e.g., 'free', 'premium'
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -37,10 +39,10 @@ class Exam(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    name = Column(String(255), nullable=False)
+    title = Column(String(255), nullable=False)
     subject_code = Column(String(50), nullable=False)
     total_questions = Column(Integer, default=60)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    date_created = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     teacher = relationship("User", back_populates="exams")
@@ -49,15 +51,18 @@ class Exam(Base):
 
 
 class AnswerKey(Base):
-    """Answer key for each exam set (A, B, C, etc.)."""
+    """
+    Answer key for each exam set (e.g., 'ক', 'খ' for Bengali or 'A', 'B' for English).
+    answers: JSON object mapping question numbers to correct options.
+    Example: {"1": 2, "2": 0, "3": 1} -> Q1=option 2, Q2=option 0, Q3=option 1
+    """
 
     __tablename__ = "answer_keys"
 
     id = Column(Integer, primary_key=True, index=True)
     exam_id = Column(Integer, ForeignKey("exams.id"), nullable=False)
-    set_code = Column(String(10), nullable=False)  # 'A', 'B', 'C', etc.
-    question_no = Column(Integer, nullable=False)
-    correct_option = Column(Integer, nullable=False)  # 0-3 for circles (A, B, C, D)
+    set_code = Column(String(10), nullable=False)  # 'ক', 'খ', 'A', 'B', etc.
+    answers = Column(JSONB, nullable=False)  # {"1": 0, "2": 2, "3": 1, ...}
 
     # Relationships
     exam = relationship("Exam", back_populates="answer_keys")
@@ -73,9 +78,9 @@ class Result(Base):
     roll_number = Column(String(50), nullable=False)
     set_code = Column(String(10), nullable=False)
     marks_obtained = Column(Integer, default=0)
-    wrong_answers = Column(Integer, default=0)
+    wrong_answers = Column(JSONB, default=lambda: [])  # [2, 5, 12] - list of wrong question numbers
     percentage = Column(Float, default=0.0)
-    uploaded_image_url = Column(String(500), nullable=True)
+    image_url = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
