@@ -320,10 +320,21 @@ async def export_exam_results(
         buffer = export_results_excel(
             results_data, exam.title, exam.total_questions
         )
+        # Check if we got xlsx (openpyxl) or CSV fallback
+        buffer.seek(0)
+        first_bytes = buffer.read(4)
+        buffer.seek(0)
+        is_xlsx = first_bytes[:2] == b"PK"  # xlsx is a zip file
+        media_type = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if is_xlsx
+            else "text/csv"
+        )
+        ext = "xlsx" if is_xlsx else "csv"
         return StreamingResponse(
             buffer,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f'attachment; filename="exam-{exam_id}-results.xlsx"'},
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="exam-{exam_id}-results.{ext}"'},
         )
 
 
