@@ -1,10 +1,40 @@
 """Generate standardized OMR sheet PDF template."""
 
 import io
+import os
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+BENGALI_SET_CODES = ["ক", "খ", "গ", "ঘ"]
+_BENGALI_FONT_REGISTERED = False
+
+# Try to register a Bengali font for PDF rendering (ক, খ, গ, ঘ)
+_BENGALI_FONT_PATHS = [
+    "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansBengali-Regular.ttf",
+    os.path.join(os.path.dirname(__file__), "..", "..", "fonts", "NotoSansBengali-Regular.ttf"),
+]
+
+
+def _ensure_bengali_font():
+    """Register Bengali font if available for rendering ক, খ, গ, ঘ."""
+    global _BENGALI_FONT_REGISTERED
+    if _BENGALI_FONT_REGISTERED:
+        return True
+    for path in _BENGALI_FONT_PATHS:
+        if os.path.isfile(path):
+            try:
+                pdfmetrics.registerFont(TTFont("Bengali", path))
+                _BENGALI_FONT_REGISTERED = True
+                return True
+            except Exception:
+                pass
+    return False
+ENGLISH_SET_CODES = ["A", "B", "C", "D"]
 
 
 def generate_omr_template_pdf(
@@ -13,6 +43,8 @@ def generate_omr_template_pdf(
     total_questions: int = 60,
     questions_per_column: int = 15,
     options_per_question: int = 4,
+    use_bengali_set_codes: bool = True,
+    num_sets: int = 4,
 ) -> io.BytesIO:
     """
     Generate a printable OMR sheet PDF.
@@ -64,15 +96,20 @@ def generate_omr_template_pdf(
             c.drawCentredString(x + (digit_w - 1) / 2, y + (digit_h - 1) / 2 - 2, str(row))
             c.setFont("Helvetica", 10)
 
-    # --- Set Code zone (A, B, C, D or ক, খ, গ, ঘ) ---
+    # --- Set Code zone (ক, খ, গ, ঘ or A, B, C, D) ---
     set_x = margin_left + content_width * 0.65
     c.drawString(set_x, roll_y + 6 * mm, "Set:")
-    set_codes = ["A", "B", "C", "D"]
+    base_codes = BENGALI_SET_CODES if use_bengali_set_codes else ENGLISH_SET_CODES
+    set_codes = base_codes[: min(num_sets, 4)]
     set_w = 12 * mm
+    if use_bengali_set_codes and _ensure_bengali_font():
+        c.setFont("Bengali", 12)
     for i, code in enumerate(set_codes):
         x = set_x + i * set_w
         c.rect(x, roll_y, set_w - 1, roll_box_h - 2 * mm, fill=0, stroke=1)
         c.drawCentredString(x + (set_w - 1) / 2, roll_y + (roll_box_h - 2 * mm) / 2 - 2, code)
+    if use_bengali_set_codes and _ensure_bengali_font():
+        c.setFont("Helvetica", 10)
 
     # --- MCQ Grid (60 questions, 4 columns of 15) ---
     grid_top = roll_y - 25 * mm

@@ -351,10 +351,21 @@ async def download_omr_template(
     if exam.teacher_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    ak_result = await db.execute(select(AnswerKey).where(AnswerKey.exam_id == exam_id))
+    answer_keys = ak_result.scalars().all()
+    use_bengali = True
+    num_sets = 4
+    if answer_keys:
+        first_set = answer_keys[0].set_code
+        use_bengali = first_set in ("ক", "খ", "গ", "ঘ")
+        num_sets = len(answer_keys)
+
     buffer = generate_omr_template_pdf(
         exam_title=exam.title,
         subject_code=exam.subject_code,
         total_questions=exam.total_questions,
+        use_bengali_set_codes=use_bengali,
+        num_sets=num_sets,
     )
     return StreamingResponse(
         buffer,
