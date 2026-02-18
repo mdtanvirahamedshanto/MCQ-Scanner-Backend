@@ -17,10 +17,49 @@ from app.dependencies import get_current_user
 from app.utils.omr_template import generate_omr_template_pdf
 from app.utils.export_results import export_results_excel, export_results_pdf
 from app.utils.omr_engine import process_omr_image, grade_omr_result
+from app.utils.answer_key_ocr import parse_answer_key_image
 from app.schemas import ScanResultResponse
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 settings = get_settings()
+
+
+@router.post("/parse-answer-key")
+async def parse_answer_key_from_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Upload answer key image (handwritten or printed).
+    Supports: ১. ক, 1. A, 1. 1 format. Returns extracted answers for teacher to confirm.
+    """
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image (JPEG, PNG, etc.)")
+
+    upload_dir = Path(settings.UPLOAD_DIR)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "img").suffix or ".jpg"
+    tmp_path = upload_dir / f"answer_key_{uuid.uuid4()}{ext}"
+
+    try:
+        contents = await file.read()
+        if len(contents) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large")
+        with open(tmp_path, "wb") as f:
+            f.write(contents)
+
+        answers, err = parse_answer_key_image(str(tmp_path))
+        if err:
+            raise HTTPException(status_code=400, detail=err)
+
+        # Convert to frontend format: {1: "A", 2: "B", ...}
+        return {"answers": answers, "count": len(answers)}
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
 
 
 @router.post("/create", response_model=ExamResponse)

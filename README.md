@@ -157,6 +157,7 @@ python scripts/create_admin.py
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | POST | `/exams/create` | Yes (Bearer) | Create exam + answer key |
+| POST | `/exams/parse-answer-key` | Yes (Bearer) | Upload answer key image (handwritten/printed), OCR & extract answers |
 | POST | `/exams/{exam_id}/scan` | Yes (Bearer) | Upload OMR image, process & grade |
 
 ---
