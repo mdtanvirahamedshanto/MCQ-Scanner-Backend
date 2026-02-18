@@ -6,19 +6,23 @@ uvicorn[standard]==0.27.1
 sqlalchemy==2.0.25
 asyncpg==0.29.0
 alembic==1.13.1
+greenlet>=3.0.0
 
 # Computer Vision
 opencv-python-headless==4.9.0.80
 numpy==1.26.4
+scipy>=1.11.0
 imutils==0.5.4
 
 # Auth & Security
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+bcrypt>=4.0.0,<4.1.0
 
 # Validation & Config
 pydantic==2.6.1
 pydantic-settings==2.1.0
+email-validator>=2.0.0
 
 # File handling
 python-multipart==0.0.9

@@ -31,7 +31,11 @@ class User(Base):
 
     # Relationships
     exams = relationship("Exam", back_populates="teacher")
-    pending_payments = relationship("PendingPayment", back_populates="user")
+    pending_payments = relationship(
+        "PendingPayment",
+        back_populates="user",
+        foreign_keys="[PendingPayment.user_id]",
+    )
 
 
 class PendingPayment(Base):

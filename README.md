@@ -128,6 +128,19 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - **Swagger docs**: http://localhost:8000/docs  
 - **ReDoc**: http://localhost:8000/redoc  
 
+### 7. Create admin user
+
+```bash
+# With email and password as arguments
+python scripts/create_admin.py admin@example.com mypassword
+
+# Or use the shell script
+./scripts/make_admin.sh admin@example.com mypassword
+
+# Interactive mode (prompts for email and password)
+python scripts/create_admin.py
+```
+
 ---
 
 ## API Endpoints
