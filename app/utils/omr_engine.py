@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 from imutils.perspective import four_point_transform
 from pathlib import Path
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Union
 from dataclasses import dataclass, field
 
 
@@ -277,7 +277,7 @@ class OMRProcessor:
         self.total_questions = total_questions
         self.use_bengali_set_codes = use_bengali_set_codes
 
-    def process(self, image_path: str | Path) -> OMRResult:
+    def process(self, image_path: Union[str, Path]) -> OMRResult:
         """
         Main entry: process OMR sheet image.
         Extracts Roll Number, Set Code, and MCQ answers.
@@ -380,7 +380,7 @@ class OMRProcessor:
 
 
 def process_omr_image(
-    image_path: str | Path,
+    image_path: Union[str, Path],
     num_questions: int = 60,
     use_bengali_set_codes: bool = True,
 ) -> OMRResult:

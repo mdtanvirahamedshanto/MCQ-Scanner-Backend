@@ -1,6 +1,7 @@
 """Admin-only endpoints."""
 
 from datetime import datetime
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -43,7 +44,7 @@ async def admin_stats(
 
 @router.get("/pending-payments")
 async def list_pending_payments(
-    status_filter: str | None = None,
+    status_filter: Optional[str] = None,
     current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
