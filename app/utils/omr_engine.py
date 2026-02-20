@@ -150,8 +150,14 @@ def _find_corner_markers(gray: np.ndarray) -> Optional[np.ndarray]:
         return None
 
     candidates.sort(key=lambda x: x[0], reverse=True)
-    markers = [c[1] for c in candidates[:4]]
-    pts = np.concatenate(markers)
+    centers = []
+    for c in candidates[:4]:
+        approx = c[1] # shape (4, 1, 2)
+        pts_2d = approx.reshape(-1, 2)
+        center = pts_2d.mean(axis=0)
+        centers.append(center)
+        
+    pts = np.array(centers, dtype=np.float32)
     ordered = _order_points(pts)
     return ordered.astype(np.float32)
 

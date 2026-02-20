@@ -103,7 +103,11 @@ async def scan_omr(
         )
 
     # Get answer key for detected set
-    set_code = omr_result.set_code
+    if len(answer_key_by_set) == 1:
+        set_code = list(answer_key_by_set.keys())[0]
+    else:
+        set_code = omr_result.set_code
+
     if set_code not in answer_key_by_set:
         return ScanResultResponse(
             roll_number=omr_result.roll_number,
