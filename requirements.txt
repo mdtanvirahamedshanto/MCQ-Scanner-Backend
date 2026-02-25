@@ -38,3 +38,13 @@ openpyxl==3.1.2
 
 # Stripe (optional - for payment)
 stripe==10.0.0
+
+# OAuth verification
+google-auth==2.35.0
+
+# Background jobs / queue
+celery==5.4.0
+redis==5.1.1
+
+# Tests
+pytest==8.3.5

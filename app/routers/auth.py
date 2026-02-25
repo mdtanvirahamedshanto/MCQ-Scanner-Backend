@@ -1,6 +1,7 @@
 """Authentication endpoints."""
 
 from datetime import datetime
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,7 @@ from app.config import get_settings
 from app.dependencies import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/register", response_model=UserResponse)
@@ -23,50 +25,43 @@ async def register(
     db: AsyncSession = Depends(get_db),
 ):
     """Register a new teacher/user."""
-    result = await db.execute(select(User).where(User.email == user_data.email))
-    if result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered",
+    try:
+        email = str(user_data.email).strip().lower()
+        result = await db.execute(select(User).where(User.email == email))
+        if result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered",
+            )
+        settings = get_settings()
+        role = "admin" if settings.ADMIN_EMAIL and email == settings.ADMIN_EMAIL.lower() else "teacher"
+        user = User(
+            email=email,
+            hashed_password=get_password_hash(user_data.password),
+            role=role,
+            institution_name=user_data.institution_name,
+            address=user_data.address,
+            tokens=500,
         )
-    settings = get_settings()
-    role = "admin" if settings.ADMIN_EMAIL and user_data.email.lower() == settings.ADMIN_EMAIL.lower() else "teacher"
-    user = User(
-        email=user_data.email,
-        hashed_password=get_password_hash(user_data.password),
-        role=role,
-        institution_name=user_data.institution_name,
-        address=user_data.address,
-        tokens=500,
-    )
-    db.add(user)
-    await db.flush()
-    await db.refresh(user)
-    return user
+        db.add(user)
+        await db.flush()
+        await db.refresh(user)
+        return user
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected register failure: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Registration service is temporarily unavailable",
+        )
 
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
     """Get current user info (for role check)."""
-    updated = False
-    if current_user.role is None:
-        current_user.role = "teacher"
-        updated = True
-    if current_user.is_subscribed is None:
-        current_user.is_subscribed = False
-        updated = True
-    if current_user.tokens is None:
-        current_user.tokens = 500
-        updated = True
-
-    if updated:
-        db.add(current_user)
-        await db.flush()
-        await db.refresh(current_user)
-
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
@@ -86,12 +81,28 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     """Login and receive JWT access token."""
-    result = await db.execute(select(User).where(User.email == login_data.email))
-    user = result.scalar_one_or_none()
-    if not user or not verify_password(login_data.password, user.hashed_password):
+    try:
+        email = str(login_data.email).strip().lower()
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        password_ok = False
+        if user and user.hashed_password:
+            try:
+                password_ok = verify_password(login_data.password, user.hashed_password)
+            except Exception:
+                password_ok = False
+        if not user or not password_ok:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+            )
+        access_token = create_access_token(data={"sub": str(user.id)})
+        return Token(access_token=access_token, role=user.role)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected login failure: %s", exc)
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Login service is temporarily unavailable",
         )
-    access_token = create_access_token(data={"sub": str(user.id)})
-    return Token(access_token=access_token, role=user.role)

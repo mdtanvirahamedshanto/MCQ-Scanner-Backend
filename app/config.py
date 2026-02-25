@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-me-in-production"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    BACKEND_JWT_SECRET: str = "change-me-in-production"
+    BACKEND_JWT_EXPIRE_MINUTES: int = 60 * 24 * 7
 
     # CORS - comma-separated origins, e.g. "http://localhost:3000,https://app.example.com"
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
@@ -23,6 +25,19 @@ class Settings(BaseSettings):
     # Storage
     UPLOAD_DIR: str = "uploads"
     MAX_UPLOAD_SIZE_MB: int = 10
+    STORAGE_ROOT: str = "private_storage"
+    SIGNED_URL_SECRET: str = "change-me-signed-url-secret"
+    SIGNED_URL_EXPIRE_SECONDS: int = 600
+
+    # Queue
+    REDIS_URL: str = "redis://localhost:6379/0"
+
+    # Token model
+    TOKEN_COST_PER_SUCCESS_SHEET: int = 1
+
+    # OAuth / frontend
+    GOOGLE_CLIENT_ID: str = ""
+    FRONTEND_URL: str = "http://localhost:3000"
 
     # Stripe (optional)
     STRIPE_SECRET_KEY: str = ""

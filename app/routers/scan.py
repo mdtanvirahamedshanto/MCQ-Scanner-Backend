@@ -17,6 +17,7 @@ import fitz # PyMuPDF
 
 router = APIRouter(prefix="/scan-omr", tags=["scan"])
 settings = get_settings()
+BENGALI_CODES = {"ক", "খ", "গ", "ঘ", "ঙ", "চ"}
 
 
 @router.post("/{exam_id}", response_model=ScanResultResponse)
@@ -63,6 +64,9 @@ async def scan_omr(
     answer_keys = ak_result.scalars().all()
     # Build dict: set_code -> answers (for lookup by set)
     answer_key_by_set = {ak.set_code: ak.answers for ak in answer_keys}
+    use_bengali_set_codes = True
+    if answer_keys:
+        use_bengali_set_codes = (answer_keys[0].set_code in BENGALI_CODES)
 
     if not answer_key_by_set:
         raise HTTPException(
@@ -109,7 +113,7 @@ async def scan_omr(
     omr_result = process_omr_image(
         str(image_path),
         num_questions=exam.total_questions,
-        use_bengali_set_codes=True,
+        use_bengali_set_codes=use_bengali_set_codes,
     )
 
     if not omr_result.success:

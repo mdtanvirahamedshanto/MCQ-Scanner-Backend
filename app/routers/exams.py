@@ -22,6 +22,7 @@ from app.schemas import ScanResultResponse
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 settings = get_settings()
+BENGALI_CODES = {"ক", "খ", "গ", "ঘ", "ঙ", "চ"}
 
 
 @router.post("/parse-answer-key")
@@ -111,6 +112,9 @@ async def bulk_scan_omr(
     ak_result = await db.execute(select(AnswerKey).where(AnswerKey.exam_id == exam_id))
     answer_keys = ak_result.scalars().all()
     answer_key_by_set = {ak.set_code: ak.answers for ak in answer_keys}
+    use_bengali_set_codes = True
+    if answer_keys:
+        use_bengali_set_codes = (answer_keys[0].set_code in BENGALI_CODES)
     if not answer_key_by_set:
         raise HTTPException(status_code=400, detail="Exam has no answer key configured")
 
@@ -173,7 +177,7 @@ async def bulk_scan_omr(
         omr_result = process_omr_image(
             filepath,
             num_questions=exam.total_questions,
-            use_bengali_set_codes=True,
+            use_bengali_set_codes=use_bengali_set_codes,
         )
 
         if not omr_result.success:
@@ -191,7 +195,10 @@ async def bulk_scan_omr(
             )
             continue
 
-        set_code = omr_result.set_code
+        if len(answer_key_by_set) == 1:
+            set_code = list(answer_key_by_set.keys())[0]
+        else:
+            set_code = omr_result.set_code
         if set_code not in answer_key_by_set:
             scan_results.append(
                 ScanResultResponse(

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional, Dict, List, Union
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 # --- Auth Schemas ---
@@ -12,8 +12,21 @@ class UserCreate(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
-    institution_name: Optional[str] = None
-    address: Optional[str] = None
+    institution_name: str = Field(..., min_length=1, max_length=255)
+    address: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return str(value).strip().lower()
+
+    @field_validator("institution_name", "address")
+    @classmethod
+    def non_blank_required(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("field is required")
+        return cleaned
 
 
 class UserResponse(BaseModel):
@@ -85,6 +98,11 @@ class LoginRequest(BaseModel):
 
     email: EmailStr
     password: str
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return str(value).strip().lower()
 
 
 # --- Exam Schemas ---
