@@ -357,7 +357,125 @@ def _read_set_code(
     )
     return codes[idx] if idx >= 0 else "?"
 
+def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> list:
+    answers = [-1] * total_questions
+    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY) if len(warped.shape) == 3 else warped.copy()
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 10
+    )
 
+    h_img, w_img = warped.shape[:2]
+
+    # 1. Find the Y coordinates using left timing marks
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    t_marks = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        aspect_ratio = w / float(h + 1e-6)
+        if 800 < w * h < 12000 and x < w_img * 0.15: # Target left edge
+            hull = cv2.convexHull(cnt)
+            hull_area = cv2.contourArea(hull)
+            if hull_area > 0:
+                solidity = float(cv2.contourArea(cnt)) / hull_area
+                if solidity > 0.9 and 1.0 < aspect_ratio < 2.0:
+                    # Also need to make sure the inside is completely dark
+                    roi = warped[y:y+h, x:x+w]
+                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+                    if np.mean(gray_roi) < 100:
+                        t_marks.append((x, y, w, h))
+
+    t_marks.sort(key=lambda m: m[1])
+    # Each row is vertically centered to the tracking mark
+    row_centers = [y + h // 2 for (x, y, w, h) in t_marks]
+    
+    print(f"Row Centers ({len(row_centers)}): {row_centers}")
+    if len(row_centers) == 0:
+        return answers # Failed completely
+
+    rows_count = len(row_centers)
+    num_cols = (total_questions + rows_count - 1) // rows_count
+
+    # 2. Find the X coordinates using perfectly printed bubbles
+    b_contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    bubble_xs = []
+    for cnt in b_contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        area = w * h
+        if 3000 < area < 8000 and 0.8 < (w / (h + 1e-6)) < 1.2:
+            peri = cv2.arcLength(cnt, True)
+            if peri > 0:
+                circ = 4 * np.pi * (cv2.contourArea(cnt) / (peri * peri))
+                if 0.8 < circ <= 1.2:
+                    bubble_xs.append(x + w // 2)
+
+    if len(bubble_xs) < num_cols * 4: # Not enough valid shapes
+        return answers
+
+    # Cluster X coordinates (radius 20px)
+    bubble_xs.sort()
+    clusters = []
+    current_cluster = [bubble_xs[0]]
+    for i in range(1, len(bubble_xs)):
+        if bubble_xs[i] - bubble_xs[i-1] < 20: 
+            current_cluster.append(bubble_xs[i])
+        else:
+            clusters.append(int(np.median(current_cluster)))
+            current_cluster = [bubble_xs[i]]
+    clusters.append(int(np.median(current_cluster)))
+
+    b_xs_arr = np.array(bubble_xs)
+    valid_clusters = []
+    for cluster_x in clusters:
+        # Require cluster to appear in at least 25% of rows
+        count = np.sum(np.abs(b_xs_arr - cluster_x) < 20)
+        if count >= max(1, rows_count * 0.25):
+            valid_clusters.append(cluster_x)
+            
+    valid_clusters.sort()
+    expected_cols = num_cols * 4
+    if len(valid_clusters) < expected_cols:
+        return answers
+        
+    x_grid = valid_clusters[:expected_cols]
+
+    # Draw debug points
+    debug_img = warped.copy()
+    if len(debug_img.shape) == 2:
+        debug_img = cv2.cvtColor(debug_img, cv2.COLOR_GRAY2BGR)
+
+    # Generate answers based on intersections!
+    for q in range(total_questions):
+        c_idx = q // rows_count
+        r_idx = q % rows_count
+        if r_idx >= len(row_centers): continue
+            
+        cy = row_centers[r_idx]
+        max_density = 0
+        marked_opt = -1
+        
+        for opt in range(4):
+            x_idx = c_idx * 4 + opt
+            if x_idx >= len(x_grid): continue
+            cx = x_grid[x_idx]
+            
+            box_r = 25
+            roi_y1, roi_y2 = max(0, cy - box_r), min(h_img, cy + box_r)
+            roi_x1, roi_x2 = max(0, cx - box_r), min(w_img, cx + box_r)
+            
+            cv2.rectangle(debug_img, (roi_x1, roi_y1), (roi_x2, roi_y2), (0, 0, 255), 2)
+            
+            d = _get_bubble_density(warped[roi_y1:roi_y2, roi_x1:roi_x2])
+            if d > 0.2:
+                print(f"Q{q} Opt{opt}: density={d:.2f}, cx={cx}, cy={cy}")
+
+            if d > 0.25 and d > max_density:
+                max_density = d
+                marked_opt = opt
+                
+        answers[q] = marked_opt
+        
+    cv2.imwrite("debug_rois_normal.jpg", debug_img)
+    return answers
 class OMRProcessor:
     """
     OMR processing class - encapsulates all OMR logic.
@@ -400,7 +518,9 @@ class OMRProcessor:
             # Find corner markers and warp
             markers = _find_corner_markers(blurred)
             if markers is None:
-                warped = cv2.resize(gray, (self.sheet_width, self.sheet_height))
+                aspect = gray.shape[0] / float(gray.shape[1])
+                target_h = int(self.sheet_width * aspect)
+                warped = cv2.resize(gray, (self.sheet_width, target_h))
             else:
                 warped = _warp_perspective(img, markers)
                 if len(warped.shape) == 3:
@@ -482,6 +602,10 @@ class OMRProcessor:
                     if marked >= 0:
                         bubbles_detected += 1
                     answers.append(marked)
+            else:
+                print("Fallback: Using proportional matrix mapping for NormalOMRLayout...")
+                answers = _extract_normal_omr_answers(warped, self.total_questions)
+                bubbles_detected = sum(1 for a in answers if a >= 0)
             
             result.answers = answers
 

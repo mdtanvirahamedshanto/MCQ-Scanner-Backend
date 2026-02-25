@@ -58,7 +58,7 @@ def get_dynamic_zones(warped, total_questions=100):
     }
 
 if __name__ == "__main__":
-    img = cv2.imread("omrsheet.png")
+    img = cv2.imread("omrsheet-board.jpg")
     blurred = _preprocess_image(img)
     markers = _find_corner_markers(blurred)
     if markers is None:
