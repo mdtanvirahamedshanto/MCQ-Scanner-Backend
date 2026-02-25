@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from app.utils.omr_engine import _preprocess_image, _find_corner_markers, _warp_perspective
 
-img = cv2.imread("omrsheet.png")
+img = cv2.imread("simulated_marked.jpg")
 blurred = _preprocess_image(img)
 markers = _find_corner_markers(blurred)
 warped = _warp_perspective(img, markers)

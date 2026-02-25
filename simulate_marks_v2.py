@@ -3,7 +3,7 @@ import numpy as np
 from app.utils.omr_engine import _preprocess_image, _find_corner_markers, _warp_perspective
 from extract_dynamic_layout import get_dynamic_zones
 
-img_path = "test_omr.jpg"
+img_path = "omrsheet.png"
 img = cv2.imread(img_path)
 blurred = _preprocess_image(img)
 markers = _find_corner_markers(blurred)
