@@ -33,6 +33,9 @@ async def register(
         email=user_data.email,
         hashed_password=get_password_hash(user_data.password),
         role=role,
+        institution_name=user_data.institution_name,
+        address=user_data.address,
+        tokens=500,
     )
     db.add(user)
     await db.flush()

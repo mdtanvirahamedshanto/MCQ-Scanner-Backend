@@ -51,8 +51,8 @@ class OMRResult:
 # --- OMR Sheet Layout Constants ---
 SHEET_WIDTH = 2480
 SHEET_HEIGHT = 3508
-MARKER_MIN_AREA_RATIO = 0.001
-MARKER_MAX_AREA_RATIO = 0.15
+MARKER_MIN_AREA_RATIO = 0.0005
+MARKER_MAX_AREA_RATIO = 0.015
 QUESTIONS_PER_COLUMN = 15
 OPTIONS_PER_QUESTION = 4
 TOTAL_QUESTIONS = 60
@@ -317,52 +317,75 @@ class OMRProcessor:
             h, w = warped.shape
 
             # --- Zone definitions ---
-            header_height = int(h * 0.18)
-            grid_top = int(h * 0.22)
-            grid_height = h - grid_top - int(h * 0.05)
-            grid_width = int(w * 0.88)
-            grid_left = int(w * 0.06)
-
-            # Zone 1: Roll Number (top-left)
-            roll_region_w = int(grid_width * 0.35)
-            roll_region_h = header_height
-            roll_x = grid_left
-            roll_y = int(h * 0.05)
-            roll_region = warped[roll_y : roll_y + roll_region_h, roll_x : roll_x + roll_region_w]
+            # Coordinates mapped precisely from OpenCV dynamic contour detection of the PDF
+            roll_x, roll_y = 378, 211
+            roll_region_w, roll_region_h = 674, 938
+            
             result.roll_number = _read_roll_number(
                 warped, roll_x, roll_y, roll_region_w, roll_region_h, 6
             )
 
             # Zone 2: Set Code
-            set_region_w = int(grid_width * 0.15)
-            set_region_x = grid_left + int(grid_width * 0.6)
-            set_region = warped[roll_y : roll_y + roll_region_h, set_region_x : set_region_x + set_region_w]
+            set_region_x, set_region_y = 1480, 211
+            set_region_w, set_region_h = 334, 935
             result.set_code = _read_set_code(
                 warped,
                 set_region_x,
-                roll_y,
+                set_region_y,
                 set_region_w,
-                roll_region_h,
+                set_region_h,
                 self.use_bengali_set_codes,
             )
 
-            # Zone 3: MCQ Grid (60 questions)
-            num_cols = (self.total_questions + QUESTIONS_PER_COLUMN - 1) // QUESTIONS_PER_COLUMN
-            q_block_h = grid_height // QUESTIONS_PER_COLUMN
-            q_block_w = grid_width // num_cols
-            opt_h = q_block_h // OPTIONS_PER_QUESTION
-            opt_w = q_block_w // OPTIONS_PER_QUESTION
+            # Zone 3: MCQ Grid
+            grid_top = 1524
+            grid_height = 1705
+            grid_left = 11
+            column_step = 622  # Distance between start of one col to the next (e.g. 633 - 11)
 
             answers = []
             bubbles_detected = 0
+            
+            # For 100 questions, it's 4 cols of 25. For 60 questions, it's 3 cols of 20.
+            if self.total_questions == 100:
+                questions_per_column_local = 25
+                num_cols = 4
+            else:
+                questions_per_column_local = 20
+                if self.total_questions <= 40: num_cols = 2
+                elif self.total_questions <= 60: num_cols = 3
+                else: num_cols = 4
+
+            # Each column bounding box width is ~593
+            col_width = 593
+            q_block_h = grid_height // questions_per_column_local
+            opt_w = col_width // OPTIONS_PER_QUESTION
+            opt_h = q_block_h
+
             for q in range(self.total_questions):
-                col_idx = q // QUESTIONS_PER_COLUMN
-                row_idx = q % QUESTIONS_PER_COLUMN
-                x_start = grid_left + col_idx * (grid_width // num_cols)
+                col_idx = q // questions_per_column_local
+                row_idx = q % questions_per_column_local
+                
+                # Each column starts exactly at grid_left + col_idx * column_step
+                x_start = grid_left + col_idx * column_step
+                # There's a 30px label on the left (e.g. '1', '2') inside the table HTML td!
+                # Wait! The table contour x=11, width=593 INCLUDE the question number.
+                # In HTML: "td width 30px" for number. So the bubbles start after 30px.
+                # In Warped terms: 30px * 3.701 = 111 px roughly. 
+                # And the bubbles are slightly centered in their TD.
+                # The remaining col_width for bubbles is roughly 593 - 111 = 482.
+                # So opt_w = 482 // 4 = 120.
+                
+                # To be absolutely sure, we use the contour layout safely:
+                # Let's adjust bubble scanning region:
+                bubble_grid_x = x_start + int(30 * (2480 / 670.0)) # ~111 px offset for question number
+                bubble_grid_w = col_width - int(30 * (2480 / 670.0))
+                opt_w_adj = bubble_grid_w // OPTIONS_PER_QUESTION
+                
                 y_start = grid_top + row_idx * q_block_h
 
                 marked = _detect_marked_option_by_density(
-                    warped, x_start, y_start, OPTIONS_PER_QUESTION, opt_w, opt_h
+                    warped, bubble_grid_x, y_start, OPTIONS_PER_QUESTION, opt_w_adj, opt_h
                 )
                 if marked >= 0:
                     bubbles_detected += 1

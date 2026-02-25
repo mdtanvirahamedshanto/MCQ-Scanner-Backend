@@ -27,6 +27,9 @@ class User(Base):
     role = Column(String(20), default="teacher")  # 'admin' | 'teacher'
     is_subscribed = Column(Boolean, default=False)
     subscription_plan = Column(String(50), nullable=True)  # e.g., '1month', '6month', '1year'
+    institution_name = Column(String(255), nullable=True)
+    address = Column(String(255), nullable=True)
+    tokens = Column(Integer, default=500)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

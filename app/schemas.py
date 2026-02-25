@@ -12,6 +12,8 @@ class UserCreate(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    institution_name: Optional[str] = None
+    address: Optional[str] = None
 
 
 class UserResponse(BaseModel):
@@ -22,6 +24,9 @@ class UserResponse(BaseModel):
     role: Optional[str] = "teacher"
     is_subscribed: bool
     subscription_plan: Optional[str]
+    institution_name: Optional[str]
+    address: Optional[str]
+    tokens: int
     created_at: datetime
 
     class Config:

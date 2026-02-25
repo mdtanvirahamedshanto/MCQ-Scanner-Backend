@@ -13,6 +13,7 @@ from app.schemas import ScanResultResponse
 from app.dependencies import get_current_user
 from app.utils.omr_engine import process_omr_image, grade_omr_result
 from app.config import get_settings
+import fitz # PyMuPDF
 
 router = APIRouter(prefix="/scan-omr", tags=["scan"])
 settings = get_settings()
@@ -29,10 +30,11 @@ async def scan_omr(
     Upload OMR image, process via engine, compare with answer key,
     save to Result table, and return detailed JSON response.
     """
-    if not file.content_type or not file.content_type.startswith("image/"):
+    valid_content_types = ["image/jpeg", "image/png", "image/jpg", "application/pdf"]
+    if not file.content_type or file.content_type not in valid_content_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File must be an image (JPEG, PNG, etc.)",
+            detail="File must be an image (JPEG, PNG) or PDF",
         )
 
     result = await db.execute(select(Exam).where(Exam.id == exam_id))
@@ -46,6 +48,13 @@ async def scan_omr(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to scan this exam",
+        )
+
+    # Token check
+    if current_user.tokens <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="You have no tokens left. Please purchase a subscription to scan more sheets.",
         )
 
     ak_result = await db.execute(
@@ -76,6 +85,19 @@ async def scan_omr(
             )
         with open(filepath, "wb") as f:
             f.write(contents)
+            
+        # Convert PDF to Image if necessary
+        image_path = filepath
+        if file.content_type == "application/pdf":
+            doc = fitz.open(filepath)
+            if len(doc) == 0:
+                raise HTTPException(status_code=400, detail="Empty PDF file.")
+            page = doc[0]
+            pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))  # render at 300 DPI
+            image_path = filepath.with_suffix(".jpg")
+            pix.save(str(image_path))
+            doc.close()
+            
     except HTTPException:
         raise
     except Exception as e:
@@ -85,7 +107,7 @@ async def scan_omr(
         )
 
     omr_result = process_omr_image(
-        filepath,
+        str(image_path),
         num_questions=exam.total_questions,
         use_bengali_set_codes=True,
     )
@@ -137,6 +159,10 @@ async def scan_omr(
         image_url=image_url,
     )
     db.add(result_record)
+
+    # Deduct token
+    current_user.tokens -= 1
+    db.add(current_user)
 
     return ScanResultResponse(
         roll_number=omr_result.roll_number,
