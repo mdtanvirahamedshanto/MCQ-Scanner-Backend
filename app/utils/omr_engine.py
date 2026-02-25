@@ -57,13 +57,63 @@ QUESTIONS_PER_COLUMN = 15
 OPTIONS_PER_QUESTION = 4
 TOTAL_QUESTIONS = 60
 
-# Bengali set codes (ক=0, খ=1, গ=2, ঘ=3) - maps index to character
-BENGALI_SET_CODES = ["ক", "খ", "গ", "ঘ"]
-ENGLISH_SET_CODES = ["A", "B", "C", "D"]
+# Bengali set codes (ক=0, খ=1, গ=2, ঘ=3, ঙ=4, চ=5) - maps index to character
+BENGALI_SET_CODES = ["ক", "খ", "গ", "ঘ", "ঙ", "চ"]
+ENGLISH_SET_CODES = ["A", "B", "C", "D", "E", "F"]
 
 # Blur detection threshold (Laplacian variance) - lower = blurrier
 BLUR_THRESHOLD = 100
 
+def _get_dynamic_zones(warped):
+    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY) if len(warped.shape) == 3 else warped
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 10
+    )
+    
+    contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    boxes = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if 80000 < w * h < 2500000:
+            boxes.append((x, y, w, h))
+            
+    boxes = sorted(boxes, key=lambda b: b[2]*b[3], reverse=True)
+    filtered_boxes = []
+    for b in boxes:
+        x, y, w, h = b
+        if w > 2000 or h < 200: 
+            continue
+            
+        cx, cy = x + w/2, y + h/2
+        is_inside = False
+        for fb in filtered_boxes:
+            fx, fy, fw, fh = fb
+            if fx - 100 < cx < fx+fw + 100 and fy - 100 < cy < fy+fh + 100:
+                is_inside = True
+                break
+        if not is_inside:
+            filtered_boxes.append(b)
+            
+    top_tables = [b for b in filtered_boxes if b[1] < 1400 and b[3] > 600]
+    bottom_tables = [b for b in filtered_boxes if b[1] >= 1400 and b[3] > 600]
+    
+    top_tables.sort(key=lambda b: b[0])
+    
+    roll_box = None
+    set_code_box = None
+    
+    if len(top_tables) >= 3:
+        set_code_box = top_tables[-1] # Right-most
+        roll_box = max(top_tables, key=lambda b: b[2]) # Widest
+        
+    bottom_tables.sort(key=lambda b: b[0])
+    
+    return {
+        "roll": roll_box,
+        "set_code": set_code_box,
+        "columns": bottom_tables
+    }
 
 def _order_points(pts: np.ndarray) -> np.ndarray:
     """Order 4 points as top-left, top-right, bottom-right, bottom-left."""
@@ -162,11 +212,35 @@ def _find_corner_markers(gray: np.ndarray) -> Optional[np.ndarray]:
     return ordered.astype(np.float32)
 
 
-def _warp_perspective(img: np.ndarray, src_pts: np.ndarray) -> np.ndarray:
+def _warp_perspective(img: np.ndarray, src_pts: np.ndarray, target_width: int = SHEET_WIDTH) -> np.ndarray:
     """Apply perspective transform for top-down view using imutils."""
-    warped = four_point_transform(img, src_pts)
-    if warped.shape[:2] != (SHEET_HEIGHT, SHEET_WIDTH):
-        warped = cv2.resize(warped, (SHEET_WIDTH, SHEET_HEIGHT))
+    # src_pts are top-left, top-right, bottom-right, bottom-left
+    tl, tr, br, bl = src_pts
+    
+    # Calculate widths and heights
+    width_top = np.linalg.norm(tr - tl)
+    width_bottom = np.linalg.norm(br - bl)
+    max_width_px = max(int(width_top), int(width_bottom))
+    
+    height_left = np.linalg.norm(tl - bl)
+    height_right = np.linalg.norm(tr - br)
+    max_height_px = max(int(height_left), int(height_right))
+    
+    if max_width_px == 0:
+        return img
+        
+    aspect_ratio = max_height_px / max_width_px
+    target_height = int(target_width * aspect_ratio)
+
+    dst_pts = np.array([
+        [0, 0],
+        [target_width - 1, 0],
+        [target_width - 1, target_height - 1],
+        [0, target_height - 1]
+    ], dtype=np.float32)
+
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    warped = cv2.warpPerspective(img, M, (target_width, target_height))
     return warped
 
 
@@ -197,12 +271,30 @@ def _detect_marked_option_by_density(
     Returns 0 to num_options-1, or -1 if ambiguous/none.
     """
     densities = []
+    
+    # Debug visualization
+    debug_img = None
+    if getattr(_detect_marked_option_by_density, "debug_img", None) is None:
+        _detect_marked_option_by_density.debug_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if len(img.shape) == 2 else img.copy()
+
     for i in range(num_options):
+        # We know `cell_width` is around 115px and `cell_height` is around 65px.
+        # The bubble itself is roughly 50x50 px in the warped image.
+        # So we take the center of the cell and extract a 50x50 box.
         x = x_start + i * cell_width
-        roi = img[y_start + 2 : y_start + cell_height - 2, x + 2 : x + cell_width - 2]
+        cx, cy = x + cell_width // 2, y_start + cell_height // 2
+        
+        box_radius_x, box_radius_y = 25, 20  # Height is slightly squashed
+        
+        roi_x1, roi_x2 = max(0, cx - box_radius_x), min(img.shape[1], cx + box_radius_x)
+        roi_y1, roi_y2 = max(0, cy - box_radius_y), min(img.shape[0], cy + box_radius_y)
+        
+        cv2.rectangle(_detect_marked_option_by_density.debug_img, (roi_x1, roi_y1), (roi_x2, roi_y2), (0,0,255), 2)
+        
+        roi = img[roi_y1:roi_y2, roi_x1:roi_x2]
         densities.append(_get_bubble_density(roi))
 
-    max_density = max(densities)
+    max_density = max(densities) if densities else 0
     if max_density < 0.25:  # No bubble sufficiently filled
         return -1
     max_indices = [i for i, d in enumerate(densities) if d == max_density]
@@ -316,81 +408,81 @@ class OMRProcessor:
 
             h, w = warped.shape
 
-            # --- Zone definitions ---
-            # Coordinates mapped precisely from OpenCV dynamic contour detection of the PDF
-            roll_x, roll_y = 378, 211
-            roll_region_w, roll_region_h = 674, 938
-            
-            result.roll_number = _read_roll_number(
-                warped, roll_x, roll_y, roll_region_w, roll_region_h, 6
-            )
+            # Extract zones dynamically using HTML table tracking
+            zones = _get_dynamic_zones(warped)
+
+            # Zone 1: Roll Number
+            if zones["roll"] is not None:
+                roll_x, roll_y, roll_region_w, roll_region_h = zones["roll"]
+                result.roll_number = _read_roll_number(
+                    warped, roll_x, roll_y, roll_region_w, roll_region_h, 6
+                )
+            else:
+                result.roll_number = "unknown"
 
             # Zone 2: Set Code
-            set_region_x, set_region_y = 1480, 211
-            set_region_w, set_region_h = 334, 935
-            result.set_code = _read_set_code(
-                warped,
-                set_region_x,
-                set_region_y,
-                set_region_w,
-                set_region_h,
-                self.use_bengali_set_codes,
-            )
+            if zones["set_code"] is not None:
+                set_region_x, set_region_y, set_region_w, set_region_h = zones["set_code"]
+                result.set_code = _read_set_code(
+                    warped,
+                    set_region_x,
+                    set_region_y,
+                    set_region_w,
+                    set_region_h,
+                    self.use_bengali_set_codes,
+                )
+            else:
+                result.set_code = "?"
 
             # Zone 3: MCQ Grid
-            grid_top = 1524
-            grid_height = 1705
-            grid_left = 11
-            column_step = 622  # Distance between start of one col to the next (e.g. 633 - 11)
-
+            columns = zones["columns"]
             answers = []
             bubbles_detected = 0
+
+            # Map the columns to standard grid questions
+            if len(columns) > 0:
+                # Based on total questions, how many rows per col?
+                questions_per_column_local = (self.total_questions + len(columns) - 1) // len(columns)
+                
+                # However, for typical 100Q it's 25. For 60Q it's 20.
+                if self.total_questions == 100:
+                    questions_per_column_local = 25
+                elif self.total_questions == 60:
+                    questions_per_column_local = 20
+                elif self.total_questions == 40:
+                    questions_per_column_local = 20
+
+                for q in range(self.total_questions):
+                    col_idx = q // questions_per_column_local
+                    row_idx = q % questions_per_column_local
+                    
+                    if col_idx < len(columns):
+                        col_x, col_y, col_w, col_h = columns[col_idx]
+                        
+                        # Within the column, option bubbles start after the question number.
+                        # Question number cell is ~30 HTML px -> ~111 px warped.
+                        # 4 Options remain.
+                        text_col_w = int(30 * (w / 670.0))
+                        opt_list_w = col_w - text_col_w
+                        opt_w_adj = opt_list_w // OPTIONS_PER_QUESTION
+                        
+                        # Add 1 to account for the "প্রশ্ন | উত্তর" header row in the table!
+                        opt_h = col_h // (questions_per_column_local + 1)
+                        
+                        bubble_grid_x = col_x + text_col_w
+                        # Add 1 to row_idx because 0-th row is the text header
+                        y_start = col_y + (row_idx + 1) * opt_h
+
+                        marked = _detect_marked_option_by_density(
+                            warped, bubble_grid_x, y_start, OPTIONS_PER_QUESTION, opt_w_adj, opt_h
+                        )
+                    else:
+                        marked = -1
+                        
+                    if marked >= 0:
+                        bubbles_detected += 1
+                    answers.append(marked)
             
-            # For 100 questions, it's 4 cols of 25. For 60 questions, it's 3 cols of 20.
-            if self.total_questions == 100:
-                questions_per_column_local = 25
-                num_cols = 4
-            else:
-                questions_per_column_local = 20
-                if self.total_questions <= 40: num_cols = 2
-                elif self.total_questions <= 60: num_cols = 3
-                else: num_cols = 4
-
-            # Each column bounding box width is ~593
-            col_width = 593
-            q_block_h = grid_height // questions_per_column_local
-            opt_w = col_width // OPTIONS_PER_QUESTION
-            opt_h = q_block_h
-
-            for q in range(self.total_questions):
-                col_idx = q // questions_per_column_local
-                row_idx = q % questions_per_column_local
-                
-                # Each column starts exactly at grid_left + col_idx * column_step
-                x_start = grid_left + col_idx * column_step
-                # There's a 30px label on the left (e.g. '1', '2') inside the table HTML td!
-                # Wait! The table contour x=11, width=593 INCLUDE the question number.
-                # In HTML: "td width 30px" for number. So the bubbles start after 30px.
-                # In Warped terms: 30px * 3.701 = 111 px roughly. 
-                # And the bubbles are slightly centered in their TD.
-                # The remaining col_width for bubbles is roughly 593 - 111 = 482.
-                # So opt_w = 482 // 4 = 120.
-                
-                # To be absolutely sure, we use the contour layout safely:
-                # Let's adjust bubble scanning region:
-                bubble_grid_x = x_start + int(30 * (2480 / 670.0)) # ~111 px offset for question number
-                bubble_grid_w = col_width - int(30 * (2480 / 670.0))
-                opt_w_adj = bubble_grid_w // OPTIONS_PER_QUESTION
-                
-                y_start = grid_top + row_idx * q_block_h
-
-                marked = _detect_marked_option_by_density(
-                    warped, bubble_grid_x, y_start, OPTIONS_PER_QUESTION, opt_w_adj, opt_h
-                )
-                if marked >= 0:
-                    bubbles_detected += 1
-                answers.append(marked)
-
             result.answers = answers
 
             if bubbles_detected == 0:
