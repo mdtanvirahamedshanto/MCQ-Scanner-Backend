@@ -1,5 +1,7 @@
 """Authentication endpoints."""
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -46,9 +48,36 @@ async def register(
 @router.get("/me", response_model=UserResponse)
 async def get_me(
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Get current user info (for role check)."""
-    return current_user
+    updated = False
+    if current_user.role is None:
+        current_user.role = "teacher"
+        updated = True
+    if current_user.is_subscribed is None:
+        current_user.is_subscribed = False
+        updated = True
+    if current_user.tokens is None:
+        current_user.tokens = 500
+        updated = True
+
+    if updated:
+        db.add(current_user)
+        await db.flush()
+        await db.refresh(current_user)
+
+    return UserResponse(
+        id=current_user.id,
+        email=current_user.email,
+        role=current_user.role or "teacher",
+        is_subscribed=bool(current_user.is_subscribed),
+        subscription_plan=current_user.subscription_plan,
+        institution_name=current_user.institution_name,
+        address=current_user.address,
+        tokens=current_user.tokens if current_user.tokens is not None else 500,
+        created_at=current_user.created_at or datetime.utcnow(),
+    )
 
 
 @router.post("/login", response_model=Token)
