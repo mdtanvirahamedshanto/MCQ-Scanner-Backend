@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.models import User
+from app.models import User, UserProfile, TokenWallet
 from app.schemas import UserCreate, UserResponse, Token, LoginRequest
 from app.auth import get_password_hash, verify_password, create_access_token
 from app.config import get_settings
@@ -39,11 +39,25 @@ async def register(
             email=email,
             hashed_password=get_password_hash(user_data.password),
             role=role,
+            is_active=True,
             institution_name=user_data.institution_name,
             address=user_data.address,
             tokens=500,
         )
         db.add(user)
+        await db.flush()
+
+        # Create UserProfile (v1 onboarding) pre-filled from registration data
+        db.add(UserProfile(
+            user_id=user.id,
+            institute_name=user_data.institution_name,
+            institute_address=user_data.address,
+            profile_completed_at=datetime.utcnow(),
+        ))
+
+        # Create TokenWallet so v1 wallet/billing endpoints work
+        db.add(TokenWallet(user_id=user.id, balance=0, version=0))
+
         await db.flush()
         await db.refresh(user)
         return user

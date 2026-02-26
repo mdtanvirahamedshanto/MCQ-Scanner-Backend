@@ -104,6 +104,25 @@ async def session_check(
 ):
     profile_result = await db.execute(select(UserProfile).where(UserProfile.user_id == current_user.id))
     profile = profile_result.scalar_one_or_none()
+
+    # Safety net: auto-create UserProfile for legacy-registered users
+    if not profile:
+        profile = UserProfile(
+            user_id=current_user.id,
+            institute_name=current_user.institution_name,
+            institute_address=current_user.address,
+        )
+        if current_user.institution_name and current_user.address:
+            profile.profile_completed_at = datetime.utcnow()
+        db.add(profile)
+        await db.flush()
+
+    # Safety net: auto-create TokenWallet for legacy-registered users
+    wallet_result = await db.execute(select(TokenWallet).where(TokenWallet.user_id == current_user.id))
+    if not wallet_result.scalar_one_or_none():
+        db.add(TokenWallet(user_id=current_user.id, balance=0, version=0))
+        await db.flush()
+
     profile_completed = bool(profile and profile.institute_name and profile.institute_address)
 
     return AuthSessionResponse(
