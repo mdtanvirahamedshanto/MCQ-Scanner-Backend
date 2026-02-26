@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # JWT - SECRET_KEY must be set in production
     SECRET_KEY: str = "change-me-in-production"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30  # 30 days
     BACKEND_JWT_SECRET: str = "change-me-in-production"
     BACKEND_JWT_EXPIRE_MINUTES: int = 60 * 24 * 7
 
