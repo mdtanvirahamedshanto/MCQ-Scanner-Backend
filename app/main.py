@@ -86,10 +86,16 @@ async def http_exception_handler(_: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_: Request, exc: RequestValidationError):
-    """Return consistent 422 payload with readable first error message."""
+    """Return consistent 422 payload or 404 for invalid path IDs."""
     errors = exc.errors()
     first_error = errors[0] if errors else {}
     loc = first_error.get("loc", [])
+    
+    # Special case: if someone visits /v1/exams/<uuid> (legacy URL),
+    # FastAPI path parser fails because it expects an int. Return 404.
+    if len(loc) >= 2 and loc[0] == "path" and loc[1] == "exam_id" and first_error.get("type") == "int_parsing":
+        return JSONResponse(status_code=404, content={"detail": "Exam not found"})
+
     loc_path = ".".join(str(p) for p in loc if p not in {"body", "query", "path"})
     msg = first_error.get("msg", "Validation failed")
     detail = f"{loc_path}: {msg}" if loc_path else msg

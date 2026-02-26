@@ -125,7 +125,6 @@ async def create_exam(
 ):
     exam = Exam(
         teacher_id=current_user.id,
-        user_id=current_user.id,
         title=payload.exam_name,
         exam_name=payload.exam_name,
         subject_name=payload.subject_name,
