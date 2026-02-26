@@ -465,3 +465,120 @@ async def get_scan_batch(
             for j in sorted(batch.jobs, key=lambda x: x.id)
         ],
     )
+
+
+@router.post("/exams/{exam_id}/evaluate")
+async def evaluate_omr_sheet(
+    exam_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_profile_complete),
+    db: AsyncSession = Depends(get_db),
+):
+    """Synchronous OMR evaluation: upload image, process, grade, return result."""
+    from app.utils.omr_engine import process_omr_image, grade_omr_result
+
+    valid_types = {"image/jpeg", "image/png", "image/jpg", "application/pdf"}
+    if not file.content_type or file.content_type not in valid_types:
+        raise HTTPException(status_code=400, detail="File must be an image (JPEG/PNG) or PDF")
+
+    exam = await _get_exam_for_owner(db, exam_id, current_user.id)
+
+    # Ensure answer keys exist
+    if not exam.answer_keys:
+        raise HTTPException(status_code=400, detail="Configure answer keys before evaluating")
+
+    # Build answer key lookup: set_code -> answers dict
+    BENGALI_CODES = {"ক", "খ", "গ", "ঘ", "ঙ", "চ"}
+    answer_key_by_set: Dict[str, dict] = {}
+    use_bengali = True
+    for ak in exam.answer_keys:
+        key = ak.set_code or "A"
+        answer_key_by_set[key] = ak.answers or {}
+        if key not in BENGALI_CODES:
+            use_bengali = False
+
+    # Save uploaded file
+    upload_dir = Path(settings.UPLOAD_DIR)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "image").suffix or ".jpg"
+    filename = f"{uuid.uuid4()}{ext}"
+    filepath = upload_dir / filename
+
+    contents = await file.read()
+    if len(contents) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"File too large. Max: {settings.MAX_UPLOAD_SIZE_MB}MB")
+
+    with open(filepath, "wb") as f:
+        f.write(contents)
+
+    # Convert PDF to image if needed
+    image_path = filepath
+    if file.content_type == "application/pdf":
+        try:
+            import fitz
+            doc = fitz.open(filepath)
+            if len(doc) == 0:
+                raise HTTPException(status_code=400, detail="Empty PDF file")
+            page = doc[0]
+            pix = page.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
+            image_path = filepath.with_suffix(".jpg")
+            pix.save(str(image_path))
+            doc.close()
+        except ImportError:
+            raise HTTPException(status_code=500, detail="PDF processing not available")
+
+    # Run OMR engine synchronously
+    omr_result = process_omr_image(
+        str(image_path),
+        num_questions=exam.total_questions,
+        use_bengali_set_codes=use_bengali,
+    )
+
+    if not omr_result.success:
+        return {
+            "success": False,
+            "message": omr_result.error_message,
+            "roll_number": omr_result.roll_number or "",
+            "set_code": omr_result.set_code or "?",
+            "marks_obtained": 0,
+            "wrong_answers": [],
+            "percentage": 0.0,
+            "answers": omr_result.answers,
+            "image_url": f"/{settings.UPLOAD_DIR}/{filename}",
+        }
+
+    # Pick correct answer key for the detected set
+    if len(answer_key_by_set) == 1:
+        set_code = list(answer_key_by_set.keys())[0]
+    else:
+        set_code = omr_result.set_code
+
+    if set_code not in answer_key_by_set:
+        return {
+            "success": False,
+            "message": f"No answer key found for set '{set_code}'",
+            "roll_number": omr_result.roll_number or "",
+            "set_code": set_code,
+            "marks_obtained": 0,
+            "wrong_answers": [],
+            "percentage": 0.0,
+            "answers": omr_result.answers,
+            "image_url": f"/{settings.UPLOAD_DIR}/{filename}",
+        }
+
+    answer_key = answer_key_by_set[set_code]
+    marks_obtained, wrong_answers_list, percentage = grade_omr_result(
+        omr_result, answer_key
+    )
+
+    return {
+        "success": True,
+        "message": "OMR processed successfully",
+        "roll_number": omr_result.roll_number or "",
+        "set_code": set_code,
+        "marks_obtained": marks_obtained,
+        "wrong_answers": wrong_answers_list,
+        "percentage": round(percentage, 2),
+        "answers": omr_result.answers,
+        "image_url": f"/{settings.UPLOAD_DIR}/{filename}",
+    }
