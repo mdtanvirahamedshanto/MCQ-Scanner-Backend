@@ -196,20 +196,49 @@ def _find_corner_markers(gray: np.ndarray) -> Optional[np.ndarray]:
                 if 0.5 < aspect < 2.0:
                     candidates.append((area, approx))
 
-    if len(candidates) < 4:
-        return None
-
     candidates.sort(key=lambda x: x[0], reverse=True)
     centers = []
-    for c in candidates[:4]:
+    for c in candidates:
         approx = c[1] # shape (4, 1, 2)
         pts_2d = approx.reshape(-1, 2)
         center = pts_2d.mean(axis=0)
-        centers.append(center)
         
-    pts = np.array(centers, dtype=np.float32)
-    ordered = _order_points(pts)
-    return ordered.astype(np.float32)
+        # Filter duplicates (e.g., inner/outer contours of the same square)
+        is_duplicate = False
+        for existing in centers:
+            if np.linalg.norm(center - existing) < 50:
+                is_duplicate = True
+                break
+                
+        if not is_duplicate:
+            centers.append(center)
+            if len(centers) == 10:  # Take up to top 10 distinct shapes
+                break
+
+    if len(centers) < 4:
+        return None
+        
+    import itertools
+    max_quad_area = 0
+    best_quad = None
+    
+    for quad_indices in itertools.combinations(range(len(centers)), 4):
+        quad_pts = np.array([centers[i] for i in quad_indices], dtype=np.float32)
+        ordered = _order_points(quad_pts)
+        
+        # Calculate polygon area of the 4 points
+        # area = 0.5 * |(x1y2 - y1x2) + (x2y3 - y2x3) + (x3y4 - y3x4) + (x4y1 - y4x1)|
+        x, y = ordered[:, 0], ordered[:, 1]
+        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+        
+        if area > max_quad_area:
+            max_quad_area = area
+            best_quad = ordered
+            
+    if best_quad is None:
+        return None
+
+    return best_quad.astype(np.float32)
 
 
 def _warp_perspective(img: np.ndarray, src_pts: np.ndarray, target_width: int = SHEET_WIDTH) -> np.ndarray:
@@ -367,7 +396,7 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> lis
     h_img, w_img = warped.shape[:2]
 
     # 1. Find the Y coordinates using left timing marks
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     t_marks = []
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
@@ -386,8 +415,21 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> lis
 
     t_marks.sort(key=lambda m: m[1])
     # Each row is vertically centered to the tracking mark
-    row_centers = [y + h // 2 for (x, y, w, h) in t_marks]
+    raw_row_centers = [y + h // 2 for (x, y, w, h) in t_marks]
     
+    # Cluster row centers (radius 20px) to merge duplicate contours of the same mark
+    row_centers = []
+    if raw_row_centers:
+        raw_row_centers.sort()
+        current_rc = [raw_row_centers[0]]
+        for i in range(1, len(raw_row_centers)):
+            if raw_row_centers[i] - raw_row_centers[i-1] < 20:
+                current_rc.append(raw_row_centers[i])
+            else:
+                row_centers.append(int(np.median(current_rc)))
+                current_rc = [raw_row_centers[i]]
+        row_centers.append(int(np.median(current_rc)))
+
     print(f"Row Centers ({len(row_centers)}): {row_centers}")
     if len(row_centers) == 0:
         return answers # Failed completely
@@ -437,6 +479,8 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> lis
         return answers
         
     x_grid = valid_clusters[:expected_cols]
+    print(f"Total valid clusters: {len(valid_clusters)}. First 16: {valid_clusters[:16]}")
+    print(f"Selected x_grid ({len(x_grid)}): {x_grid}")
 
     # Draw debug points
     debug_img = warped.copy()
