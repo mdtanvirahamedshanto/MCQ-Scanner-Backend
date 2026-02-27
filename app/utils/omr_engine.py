@@ -582,7 +582,7 @@ class OMRProcessor:
                     warped, roll_x, roll_y, roll_region_w, roll_region_h, 6
                 )
             else:
-                result.roll_number = "unknown"
+                result.roll_number = "N/A"
 
             # Zone 2: Set Code
             if zones["set_code"] is not None:
@@ -596,7 +596,7 @@ class OMRProcessor:
                     self.use_bengali_set_codes,
                 )
             else:
-                result.set_code = "?"
+                result.set_code = "N/A"
 
             # Zone 3: MCQ Grid
             columns = zones["columns"]

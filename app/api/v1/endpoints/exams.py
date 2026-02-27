@@ -551,7 +551,13 @@ async def evaluate_omr_sheet(
     if len(answer_key_by_set) == 1:
         set_code = list(answer_key_by_set.keys())[0]
     else:
-        set_code = omr_result.set_code
+        # If it's a NormalOMRLayout, it might return N/A or ?.
+        # In that case, we can't reliably pick a set if there are multiple sets,
+        # but we can default to the first set to avoid a hard error if possible.
+        if omr_result.set_code in ("N/A", "?"):
+            set_code = list(answer_key_by_set.keys())[0]
+        else:
+            set_code = omr_result.set_code
 
     if set_code not in answer_key_by_set:
         return {

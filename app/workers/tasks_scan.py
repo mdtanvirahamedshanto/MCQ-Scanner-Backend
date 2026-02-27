@@ -140,7 +140,7 @@ async def _process_scan_job(job_id: int) -> None:
                 return
 
             extracted = normalize_omr_answers_to_options(omr.answers)
-            detected_set = omr.set_code if omr.set_code and omr.set_code != "?" else None
+            detected_set = omr.set_code if omr.set_code and omr.set_code not in ("?", "N/A") else None
 
             if exam.has_set:
                 final_set = detected_set
