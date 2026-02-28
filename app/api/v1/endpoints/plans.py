@@ -32,7 +32,6 @@ async def _seed_default_plans_if_needed(db: AsyncSession) -> None:
 
 @router.get("", response_model=list[PlanResponse])
 async def list_plans(
-    _: User = Depends(get_current_v1_user),
     db: AsyncSession = Depends(get_db),
 ):
     await _seed_default_plans_if_needed(db)
