@@ -32,10 +32,16 @@ async def _seed_default_plans_if_needed(db: AsyncSession) -> None:
 
 @router.get("", response_model=list[PlanResponse])
 async def list_plans(
+    include_inactive: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     await _seed_default_plans_if_needed(db)
-    result = await db.execute(select(Plan).where(Plan.is_active == True).order_by(Plan.id.asc()))
+    query = select(Plan)
+    if not include_inactive:
+        query = query.where(Plan.is_active == True)
+    query = query.order_by(Plan.id.asc())
+    
+    result = await db.execute(query)
     plans = result.scalars().all()
     return [
         PlanResponse(
