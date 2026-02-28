@@ -63,6 +63,25 @@ class PlanResponse(BaseModel):
     is_active: bool
 
 
+class PlanCreateRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=100)
+    name: str = Field(..., min_length=1, max_length=255)
+    price_amount: float = Field(..., ge=0)
+    currency: str = Field(default="BDT", min_length=3, max_length=3)
+    billing_cycle: str = Field(default="monthly", max_length=20)
+    tokens_included: int = Field(..., ge=0)
+
+
+class PlanUpdateRequest(BaseModel):
+    code: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    price_amount: Optional[float] = Field(default=None, ge=0)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    billing_cycle: Optional[str] = Field(default=None, max_length=20)
+    tokens_included: Optional[int] = Field(default=None, ge=0)
+    is_active: Optional[bool] = None
+
+
 class SubscriptionCreateRequest(BaseModel):
     plan_code: str
     payment_mode: str = Field(default="manual")
