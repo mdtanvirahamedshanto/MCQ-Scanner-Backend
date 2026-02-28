@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  api:
+    build: .
+    container_name: optimark_backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./uploads:/app/uploads
+      - ./private_storage:/app/private_storage
+    # Note: If your PostgreSQL and Redis are running directly on your Mac,
+    # you MUST change 'localhost' to 'host.docker.internal' in your .env file.
+    # E.g.: DATABASE_URL=postgresql+asyncpg://user:password@host.docker.internal:5432/optimark
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
