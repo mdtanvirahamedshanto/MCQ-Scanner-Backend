@@ -230,6 +230,53 @@ async def export_results_csv(
         headers={"Content-Disposition": "attachment; filename=results.csv"},
     )
 
+@router.get("/results/export.xlsx")
+async def export_results_excel(
+    exam_id: Optional[int] = Query(default=None),
+    current_user: User = Depends(require_profile_complete),
+    db: AsyncSession = Depends(get_db),
+):
+    import openpyxl
+    stmt = select(ScannedSheet).where(ScannedSheet.user_id == current_user.id)
+    if exam_id is not None:
+        stmt = stmt.where(ScannedSheet.exam_id == exam_id)
+    rows = (await db.execute(stmt.order_by(ScannedSheet.id.desc()))).scalars().all()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "OMR Results"
+    
+    headers = ["Sheet ID", "Exam ID", "Student Roll", "Set", "Correct", "Wrong", "Unanswered", "Invalid", "Score", "Percentage (%)", "Evaluated At"]
+    ws.append(headers)
+    
+    # Simple bold header
+    for col in range(1, len(headers) + 1):
+        ws.cell(row=1, column=col).font = openpyxl.styles.Font(bold=True)
+        
+    for r in rows:
+        ws.append([
+            r.id,
+            r.exam_id,
+            r.student_identifier or "",
+            r.set_label_final or "",
+            r.correct_count or 0,
+            r.wrong_count or 0,
+            r.unanswered_count or 0,
+            r.invalid_count or 0,
+            float(f"{r.final_score or 0.0:.2f}"),
+            float(f"{r.percentage or 0.0:.2f}"),
+            r.evaluated_at.isoformat() if r.evaluated_at else "",
+        ])
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=results.xlsx"},
+    )
 
 @router.get("/results/export.pdf")
 async def export_results_pdf(
