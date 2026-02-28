@@ -78,6 +78,8 @@ async def list_pending_payments(
     }
 
 
+from app.services.token_service import credit_tokens
+
 @router.post("/pending-payments/{payment_id}/approve")
 async def approve_payment(
     payment_id: int,
@@ -85,7 +87,7 @@ async def approve_payment(
     current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Approve a pending payment and activate user subscription."""
+    """Approve a pending payment and activate user subscription, crediting tokens to their wallet."""
     result = await db.execute(
         select(PendingPayment).where(PendingPayment.id == payment_id)
     )
@@ -100,13 +102,37 @@ async def approve_payment(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Define token limits mapping
+    plan_tokens = {
+        "1month": 1000,
+        "6month": 6000,
+        "1year": 15000
+    }
+    tokens_to_credit = plan_tokens.get(payment.plan_id, 0)
+
+    # Credit tokens via unified TokenService ledger
+    if tokens_to_credit > 0:
+        await credit_tokens(
+            db=db,
+            user_id=user.id,
+            amount=tokens_to_credit,
+            reason="subscription_activated",
+            reference_type="manual_payment",
+            reference_id=str(payment.id),
+        )
+        
+    # Maintain legacy tokens column for backward compatibility
+    user.tokens = (user.tokens or 0) + tokens_to_credit
+
     user.is_subscribed = True
     user.subscription_plan = payment.plan_id
     payment.status = "approved"
     payment.admin_notes = body.admin_notes
     payment.reviewed_by = current_user.id
     payment.reviewed_at = datetime.utcnow()
-    return {"message": "Payment approved. User subscription activated."}
+    
+    await db.commit()
+    return {"message": f"Payment approved. User subscription activated and {tokens_to_credit} tokens credited."}
 
 
 @router.post("/pending-payments/{payment_id}/reject")
