@@ -353,7 +353,7 @@ class ScannedSheet(Base):
     __tablename__ = "scanned_sheets"
 
     id = Column(Integer, primary_key=True, index=True)
-    scan_job_id = Column(Integer, ForeignKey("scan_jobs.id"), nullable=False, unique=True)
+    scan_job_id = Column(Integer, ForeignKey("scan_jobs.id"), nullable=True, unique=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     exam_id = Column(Integer, ForeignKey("exams.id"), nullable=False)
     student_identifier = Column(String(100), nullable=True)

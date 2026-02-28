@@ -288,3 +288,15 @@ class FileSignResponse(BaseModel):
 class WebhookStubRequest(BaseModel):
     provider: str
     payload: Dict[str, Any]
+
+
+class ResultCreateRequest(BaseModel):
+    success: bool
+    message: str
+    roll_number: Optional[str] = None
+    set_code: Optional[str] = None
+    marks_obtained: float
+    wrong_answers: List[int]
+    percentage: float
+    answers: List[int]
+    image_url: Optional[str] = None

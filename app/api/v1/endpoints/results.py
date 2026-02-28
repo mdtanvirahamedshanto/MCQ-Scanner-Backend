@@ -1,7 +1,7 @@
 """v1 result list/detail/export endpoints."""
 
 from io import BytesIO
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -10,6 +10,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime, timezone
 
 from app.core.v1_dependencies import require_profile_complete
 from app.database import get_db
@@ -20,6 +21,7 @@ from app.schemas_v1 import (
     ResultListResponse,
     ResultQuestionItem,
     ResultSummary,
+    ResultCreateRequest,
 )
 
 router = APIRouter()
@@ -55,6 +57,72 @@ async def list_results(
         )
 
     return ResultListResponse(items=items)
+
+
+@router.post("/exams/{exam_id}/results", response_model=ResultListItem)
+async def save_result(
+    exam_id: int,
+    payload: ResultCreateRequest,
+    current_user: User = Depends(require_profile_complete),
+    db: AsyncSession = Depends(get_db),
+):
+    """Saves a transient evaluated OMR result explicitly into the database."""
+    exam = await db.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+        
+    set_label = payload.set_code if payload.set_code not in ("?", "N/A") else "A"
+    
+    wrong_count = len(payload.wrong_answers)
+    total_answered = len(payload.answers) # Assumes all parsed are answered, though actual missing isn't purely in payload
+    # Approximations since frontend evaluation doesn't pass detailed answer breakdown
+    correct_count = total_answered - wrong_count if total_answered > wrong_count else 0
+    
+    sheet = ScannedSheet(
+        exam_id=exam_id,
+        user_id=current_user.id,
+        student_identifier=payload.roll_number or "Unknown",
+        set_label_final=set_label,
+        raw_score=payload.marks_obtained,
+        final_score=payload.marks_obtained,
+        percentage=payload.percentage,
+        correct_count=correct_count,
+        wrong_count=wrong_count,
+        unanswered_count=exam.total_questions - total_answered if exam.total_questions > total_answered else 0,
+        invalid_count=0,
+        evaluated_at=datetime.utcnow()
+    )
+    db.add(sheet)
+    await db.flush()
+    await db.refresh(sheet)
+    
+    for i, ans in enumerate(payload.answers):
+        q_no = i + 1
+        is_wrong = q_no in payload.wrong_answers
+        status = "wrong" if is_wrong else "correct"
+        # Option index to string: 0->A, 1->B, 2->C, etc. -1 means unattempted/invalid
+        option_str = chr(65 + ans) if ans >= 0 else ("unanswered" if ans == -1 else "invalid")
+        sheet_answer = SheetAnswer(
+            sheet_id=sheet.id,
+            question_no=q_no,
+            selected_option=option_str,
+            status=status,
+            mark_awarded=0 if is_wrong else float(exam.mark_per_question or 1.0)
+        )
+        db.add(sheet_answer)
+        
+    await db.commit()
+    
+    return ResultListItem(
+        sheet_id=sheet.id,
+        exam_id=sheet.exam_id,
+        exam_name=(exam.exam_name if exam else None),
+        student_identifier=sheet.student_identifier,
+        set_label=sheet.set_label_final,
+        final_score=sheet.final_score or 0.0,
+        percentage=sheet.percentage or 0.0,
+        evaluated_at=sheet.evaluated_at,
+    )
 
 
 @router.get("/results/{sheet_id}", response_model=ResultDetailResponse)
@@ -103,6 +171,26 @@ async def result_detail(
         ],
     )
 
+
+@router.delete("/results/{sheet_id}")
+async def delete_result(
+    sheet_id: int,
+    current_user: User = Depends(require_profile_complete),
+    db: AsyncSession = Depends(get_db),
+):
+    sheet = await db.get(ScannedSheet, sheet_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+    if sheet.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    # Delete associated sheet answers
+    await db.execute(SheetAnswer.__table__.delete().where(SheetAnswer.sheet_id == sheet.id))
+    # Delete sheet
+    await db.delete(sheet)
+    await db.commit()
+    
+    return {"success": True, "message": "Result deleted successfully"}
 
 @router.get("/results/export.csv")
 async def export_results_csv(
