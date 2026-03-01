@@ -98,8 +98,8 @@ def _get_dynamic_zones(warped):
         if not is_inside:
             filtered_boxes.append(b)
             
-    top_tables = [b for b in filtered_boxes if b[1] < 1400 and b[3] > 600]
-    bottom_tables = [b for b in filtered_boxes if b[1] >= 1400 and b[3] > 600]
+    top_tables = [b for b in filtered_boxes if b[1] < 1400 and b[3] > 300]
+    bottom_tables = [b for b in filtered_boxes if b[1] >= 1400 and b[3] > 300]
     print(f"DEBUG _get_dynamic_zones: found {len(top_tables)} top tables, {len(bottom_tables)} bottom tables")
     for idx, b in enumerate(bottom_tables):
         print(f"  Bottom table {idx}: {b}")
@@ -324,18 +324,20 @@ def _detect_marked_option_by_density(
         roi_x1, roi_x2 = max(0, cx - box_radius_x), min(img.shape[1], cx + box_radius_x)
         roi_y1, roi_y2 = max(0, cy - box_radius_y), min(img.shape[0], cy + box_radius_y)
         
-        cv2.rectangle(_detect_marked_option_by_density.debug_img, (roi_x1, roi_y1), (roi_x2, roi_y2), (0,0,255), 2)
-        
         roi = img[roi_y1:roi_y2, roi_x1:roi_x2]
         densities.append(_get_bubble_density(roi))
 
     max_density = max(densities) if densities else 0
-    if max_density < 0.25:  # No bubble sufficiently filled
+    if max_density < 0.15:  # Relaxed slightly for lighter pencil marks
         return -1
-    max_indices = [i for i, d in enumerate(densities) if d == max_density]
-    if len(max_indices) != 1:
-        return -1  # Ambiguous
-    return max_indices[0]
+        
+    sorted_d = sorted(densities, reverse=True)
+    
+    # If the second highest is very close to the highest and is also fairly dark, it's a double mark (ambiguous)
+    if len(sorted_d) > 1 and sorted_d[1] > 0.20 and (sorted_d[0] - sorted_d[1] < 0.10):
+        return -1  # Ambiguous double-mark
+        
+    return densities.index(sorted_d[0])
 
 
 def _read_roll_number(
@@ -364,13 +366,90 @@ def _read_roll_number(
             roi = img[y + 1 : y + cell_h - 1, x_base + 1 : x_base + cell_w - 1]
             densities.append(_get_bubble_density(roi))
         max_d = max(densities)
-        if max_d >= 0.25:
-            idx = [i for i, d in enumerate(densities) if d == max_d]
-            result += str(idx[0]) if len(idx) == 1 else "?"
+        if max_d >= 0.15: # Lowered threshold to match MCQ answers
+            sorted_d = sorted(densities, reverse=True)
+            if len(sorted_d) > 1 and sorted_d[1] > 0.15 and (sorted_d[0] - sorted_d[1] < 0.10):
+                result += "?" # Ambiguous
+            else:
+                result += str(densities.index(sorted_d[0]))
         else:
             result += "?"
     return result
 
+def _extract_roll_fallback(warped: np.ndarray, num_digits: int = 6) -> str:
+    """
+    If the template has corner markers (so it is perspective warped accurately), 
+    but table detection fails to find the Roll Number box, we can use the 
+    known static location of the Roll grid.
+    
+    Layout for omrsheet.png:
+    - Y = 14% to 37%
+    - X = 64% to 92%
+    """
+def _extract_roll_fallback(warped: np.ndarray, num_digits: int = 6) -> str:
+    """
+    If the template has corner markers (so it is perspective warped accurately), 
+    but table detection fails to find the Roll Number box, we can use the 
+    known static location of the Roll grid.
+    
+    Layout for omrsheet.png:
+    - Y = 14% to 37%
+    - X = 32% to 62%
+    """
+    h, w = warped.shape[:2]
+    top_y = int(h * 0.14)
+    bottom_y = int(h * 0.38)
+    left_x = int(w * 0.345)
+    right_x = int(w * 0.62)
+    
+    cell_w = (right_x - left_x) // num_digits
+    cell_h = (bottom_y - top_y) // 10
+    
+    result = ""
+    for digit_pos in range(num_digits):
+        # Center horizontally on each digit column
+        x_base = left_x + digit_pos * cell_w
+        cx = x_base + cell_w // 2
+        
+        densities = []
+        for opt in range(10):
+            y = top_y + opt * cell_h
+            cy = y + cell_h // 2
+            
+            # Very tight round extraction zone
+            r_x, r_y = 12, 12
+            
+            roi_y1, roi_y2 = max(0, cy - r_y), min(h, cy + r_y)
+            roi_x1, roi_x2 = max(0, cx - r_x), min(w, cx + r_x)
+            
+            roi = warped[roi_y1:roi_y2, roi_x1:roi_x2]
+            d = _get_bubble_density(roi)
+            densities.append(d)
+            
+        max_d = max(densities)
+        if max_d >= 0.11: # Further slightly lowered threshold for light marks
+            sorted_d = sorted(densities, reverse=True)
+            if len(sorted_d) > 1 and sorted_d[1] > 0.10 and (sorted_d[0] - sorted_d[1] < 0.05):
+                result += "?" # Ambiguous
+            else:
+                result += str(densities.index(sorted_d[0]))
+        else:
+            result += "?"
+            
+    return result
+
+def _extract_setcode_fallback(warped: np.ndarray, use_bengali: bool = True) -> str:
+    """
+    Fallback for Set Code extraction using known static location on the new template.
+    Layout: Y = 14% to 37%, X = 66% to 71%
+    """
+    h, w = warped.shape[:2]
+    top_y = int(h * 0.14)
+    bottom_y = int(h * 0.38)
+    left_x = int(w * 0.66)
+    right_x = int(w * 0.71)
+    
+    return _read_set_code(warped, left_x, top_y, right_x - left_x, bottom_y - top_y, use_bengali)
 
 def _read_set_code(
     img: np.ndarray,
@@ -392,8 +471,11 @@ def _read_set_code(
     )
     return codes[idx] if idx >= 0 else "?"
 
-def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> list:
-    answers = [-1] * total_questions
+def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> dict:
+    answers = {}
+    for i in range(total_questions):
+        answers[i] = -1
+        
     gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY) if len(warped.shape) == 3 else warped.copy()
     thresh = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 10
@@ -512,7 +594,7 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> lis
                 
         answers[q] = marked_opt
         
-    # cv2.imwrite("debug_rois_fallback.jpg", debug_img)
+    cv2.imwrite("debug_rois_fallback.jpg", debug_img)
     return answers
 class OMRProcessor:
     """
@@ -578,6 +660,10 @@ class OMRProcessor:
                 result.roll_number = _read_roll_number(
                     warped, roll_x, roll_y, roll_region_w, roll_region_h, 6
                 )
+            elif markers is not None:
+                # If we have 4 corner markers, the image is aligned. 
+                # We can use static proportions to find the Roll!
+                result.roll_number = _extract_roll_fallback(warped, 6)
             else:
                 result.roll_number = "N/A"
 
@@ -592,11 +678,27 @@ class OMRProcessor:
                     set_region_h,
                     self.use_bengali_set_codes,
                 )
+            elif markers is not None:
+                result.set_code = _extract_setcode_fallback(warped, self.use_bengali_set_codes)
             else:
                 result.set_code = "N/A"
 
             # Zone 3: MCQ Grid
-            columns = zones["columns"]
+            raw_columns = zones["columns"]
+            columns = []
+            
+            # Split overly wide columns (e.g., if dynamic zones merged all 3 columns into 1)
+            for col in raw_columns:
+                cx, cy, cw, ch = col
+                aspect = cw / float(ch + 1e-6)
+                if aspect > 0.8: # Likely merged
+                    num_merged = 3 # Standard templates usually merge all 3 columns
+                    step_w = cw // num_merged
+                    for i in range(num_merged):
+                        columns.append((cx + i * step_w, cy, step_w, ch))
+                else:
+                    columns.append(col)
+                    
             answers = []
             bubbles_detected = 0
 
@@ -605,8 +707,14 @@ class OMRProcessor:
                 # Based on total questions, how many rows per col?
                 questions_per_column_local = (self.total_questions + len(columns) - 1) // len(columns)
                 
-                # However, for typical 100Q it's 25. For 60Q it's 20.
-                if self.total_questions == 100:
+                # However, the physical template layout stays the same regardless of self.total_questions!
+                if len(columns) == 3:
+                     # For 3 cols, standard sheets are either 3x20 = 60, or 3x10 = 30.
+                     if self.total_questions <= 30:
+                         questions_per_column_local = 10
+                     else:
+                         questions_per_column_local = 20
+                elif self.total_questions == 100:
                     questions_per_column_local = 25
                 elif self.total_questions == 60:
                     questions_per_column_local = 20
@@ -623,7 +731,7 @@ class OMRProcessor:
                         # Within the column, option bubbles start after the question number.
                         # Question number cell is ~30 HTML px -> ~111 px warped.
                         # 4 Options remain.
-                        text_col_w = int(30 * (w / 670.0))
+                        text_col_w = int(30 * (warped.shape[1] / 670.0))
                         opt_list_w = col_w - text_col_w
                         opt_w_adj = opt_list_w // OPTIONS_PER_QUESTION
                         
