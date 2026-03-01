@@ -35,6 +35,7 @@ python-dotenv==1.0.1
 # PDF & Excel export
 reportlab==4.2.0
 openpyxl==3.1.2
+PyMuPDF>=1.23.0
 
 # Stripe (optional - for payment)
 stripe==10.0.0
