@@ -243,9 +243,13 @@ def _find_corner_markers(gray: np.ndarray) -> Optional[np.ndarray]:
             
     if best_quad is None:
         return None
+        
+    # The markers must enclose a significant portion of the document (at least 45%).
+    # If it's less, it's a false positive (e.g. internal checkbox grid).
+    if max_quad_area < 0.45 * total_area:
+        return None
 
     return best_quad.astype(np.float32)
-
 
 def _warp_perspective(img: np.ndarray, src_pts: np.ndarray, target_width: int = SHEET_WIDTH) -> np.ndarray:
     """Apply perspective transform for top-down view using imutils."""
@@ -471,11 +475,8 @@ def _read_set_code(
     )
     return codes[idx] if idx >= 0 else "?"
 
-def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> dict:
-    answers = {}
-    for i in range(total_questions):
-        answers[i] = -1
-        
+def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int, columns: list = None) -> list:
+    answers = [-1] * total_questions
     gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY) if len(warped.shape) == 3 else warped.copy()
     thresh = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 10
@@ -485,21 +486,33 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> dic
 
     # Find ALL bubbles
     b_contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    bubble_xs = []
-    bubble_ys = []
     
+    # PASS 1: Strict constraints for Y-axis (Row Centers)
+    # This guarantees we only lock onto unambiguous dark bubbles, ignoring smudges and light artifacts.
+    bubble_ys = []
     for cnt in b_contours:
         x, y, w, h = cv2.boundingRect(cnt)
         area = w * h
-        # Relaxed area constraint for slightly blurry or different sized bubbles
         if 800 < area < 12000 and 0.5 < (w / (h + 1e-6)) < 2.0:
             peri = cv2.arcLength(cnt, True)
             if peri > 0:
                 circ = 4 * np.pi * (cv2.contourArea(cnt) / (peri * peri))
-                # Relaxed circularity for filled-in bubbles that look blobby
                 if 0.4 < circ <= 1.5:
-                    bubble_xs.append(x + w // 2)
                     bubble_ys.append(y + h // 2)
+
+    # PASS 2: Loose constraints for X-axis (Column offsets)
+    # This ensures extremely faint bubbles (like a lightly drawn Option D) are not skipped,
+    # preventing the [-4:] array slice from misaligning.
+    bubble_xs = []
+    for cnt in b_contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        area = w * h
+        if 200 < area < 15000 and 0.3 < (w / (h + 1e-6)) < 3.0:
+            peri = cv2.arcLength(cnt, True)
+            if peri > 0:
+                circ = 4 * np.pi * (cv2.contourArea(cnt) / (peri * peri))
+                if 0.05 < circ <= 2.5:
+                    bubble_xs.append(x + w // 2)
                     
     # Cluster Y coordinates (rows)
     bubble_ys.sort()
@@ -527,6 +540,29 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> dic
 
     if len(row_centers) == 0:
         return answers
+        
+    num_cols_estimate = 3 if total_questions % 3 == 0 else (4 if total_questions % 4 == 0 else 3)
+    target_rows = total_questions // num_cols_estimate
+    
+    if len(row_centers) > target_rows and len(row_centers) >= 3:
+        # The physical grid will have a highly consistent median gap between consecutive rows.
+        # Find the sequence of `target_rows` that are packed together with the most consistent gap.
+        diffs = np.diff(row_centers)
+        best_seq = []
+        best_variance = float('inf')
+        
+        for i in range(len(row_centers) - target_rows + 1):
+            seq = row_centers[i:i+target_rows]
+            seq_diffs = np.diff(seq)
+            variance = np.var(seq_diffs)
+            if variance < best_variance:
+                best_variance = variance
+                best_seq = seq
+                
+        # Only accept the sequence if it is highly uniform (variance < 200, stddev < 14px)
+        if best_variance < 250:
+            row_centers = best_seq
+            print(f"DEBUG fallback: Y-axis gap filtered. Kept {len(row_centers)} best uniform rows.")
 
     rows_count = len(row_centers)
     num_cols = (total_questions + rows_count - 1) // rows_count
@@ -554,13 +590,67 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> dic
     x_grid = valid_x_clusters
     print(f"DEBUG fallback: extracted {len(x_grid)} X columns from bubbles.")
     
-    expected_cols = num_cols * 4
-    if len(x_grid) < expected_cols:
-        print(f"DEBUG fallback: Warn: Found {len(x_grid)} X columns, expected {expected_cols}")
-        
     if not x_grid:
         return answers
-
+        
+    expected_cols = num_cols * 4
+    refined_x_grid = []
+    
+    if columns and len(columns) == num_cols:
+        text_col_w = int(30 * (warped.shape[1] / 670.0))
+        text_col_w = int(30 * (warped.shape[1] / 670.0))
+        for col in columns:
+            cx, cy, cw, ch = col
+            # 1. Skip the Text column
+            valid_x_start = cx + text_col_w + 20
+            valid_x_end = cx + cw
+            
+            raw_block = sorted([x for x in x_grid if valid_x_start <= x <= valid_x_end])
+            
+            # Remove any artifacts that are too close to be distinct option columns (< 60px)
+            block_xs = []
+            if raw_block:
+                block_xs.append(raw_block[0])
+                for rx in raw_block[1:]:
+                    if rx - block_xs[-1] >= 60:
+                        block_xs.append(rx)
+            
+            if len(block_xs) >= 2:
+                # 2. Mathematically generate exactly 4 spaced coordinates bounded by the physical bubbles!
+                min_bx = min(block_xs)
+                spacing = np.median(np.diff(block_xs)) if len(block_xs) > 2 else (max(block_xs) - min_bx)
+                if spacing == 0: spacing = (cw - text_col_w) // 4
+                
+                # Extrapolate exactly 4 points anchored from the first option A (min_bx)
+                for i in range(4):
+                    refined_x_grid.append(int(min_bx + i * spacing))
+            else:
+                # Total fallback if column is completely blank
+                opt_w_adj = (cw - text_col_w) // 4
+                for i in range(4):
+                    refined_x_grid.append(int(cx + cw * 0.35 + i * opt_w_adj))
+                    
+        x_grid = refined_x_grid
+    else:
+        # Generic fallback if no HTML columns
+        diffs = np.diff(x_grid)
+        gap_indices = np.argsort(diffs)[-(num_cols - 1):] if num_cols > 1 else []
+        gap_indices = sorted(gap_indices)
+        blocks = []
+        start_idx = 0
+        for g_idx in gap_indices:
+            blocks.append(x_grid[start_idx:g_idx + 1])
+            start_idx = g_idx + 1
+        blocks.append(x_grid[start_idx:])
+        
+        for block in blocks:
+            if len(block) >= 4:
+                refined_x_grid.extend(block[-4:])
+            else:
+                refined_x_grid.extend(block)
+                
+        x_grid = refined_x_grid
+        
     debug_img = warped.copy()
     if len(debug_img.shape) == 2:
         debug_img = cv2.cvtColor(debug_img, cv2.COLOR_GRAY2BGR)
@@ -581,17 +671,20 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> dic
             if x_idx >= len(x_grid): continue
             cx = x_grid[x_idx]
             
-            box_r = 25
+            box_r = 18  # Tighter radius to focus on pencil fill, avoiding empty bubble borders
             roi_y1, roi_y2 = max(0, cy - box_r), min(h_img, cy + box_r)
             roi_x1, roi_x2 = max(0, cx - box_r), min(w_img, cx + box_r)
             
             cv2.rectangle(debug_img, (roi_x1, roi_y1), (roi_x2, roi_y2), (0, 0, 255), 2)
             
-            d = _get_bubble_density(warped[roi_y1:roi_y2, roi_x1:roi_x2])
-            if d > 0.25 and d > max_density:
+            # Use raw grayscale inverse mean for physical darkness instead of edge threshold
+            crop_gray = 255 - gray[roi_y1:roi_y2, roi_x1:roi_x2]
+            d = np.mean(crop_gray) / 255.0
+                
+            if d > 0.33 and d > max_density:  # Empty bubbles are around 0.20-0.30. Filled are 0.40-0.80
                 max_density = d
                 marked_opt = opt
-                
+                    
         answers[q] = marked_opt
         
     cv2.imwrite("debug_rois_fallback.jpg", debug_img)
@@ -703,7 +796,7 @@ class OMRProcessor:
             bubbles_detected = 0
 
             # Map the columns to standard grid questions
-            if len(columns) > 0:
+            if len(columns) > 0 and markers is not None:
                 # Based on total questions, how many rows per col?
                 questions_per_column_local = (self.total_questions + len(columns) - 1) // len(columns)
                 
@@ -753,7 +846,7 @@ class OMRProcessor:
                     answers.append(marked)
             else:
                 print("Fallback: Using proportional matrix mapping for NormalOMRLayout...")
-                answers = _extract_normal_omr_answers(warped, self.total_questions)
+                answers = _extract_normal_omr_answers(warped, self.total_questions, columns)
                 bubbles_detected = sum(1 for a in answers if a >= 0)
             
             result.answers = answers
