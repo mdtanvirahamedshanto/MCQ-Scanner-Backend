@@ -62,7 +62,7 @@ BENGALI_SET_CODES = ["ক", "খ", "গ", "ঘ", "ঙ", "চ"]
 ENGLISH_SET_CODES = ["A", "B", "C", "D", "E", "F"]
 
 # Blur detection threshold (Laplacian variance) - lower = blurrier
-BLUR_THRESHOLD = 100
+BLUR_THRESHOLD = 20
 
 def _get_dynamic_zones(warped):
     gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY) if len(warped.shape) == 3 else warped
@@ -79,6 +79,9 @@ def _get_dynamic_zones(warped):
             boxes.append((x, y, w, h))
             
     boxes = sorted(boxes, key=lambda b: b[2]*b[3], reverse=True)
+    print(f"DEBUG _get_dynamic_zones: {len(boxes)} initial boxes found (area 80k-2.5m)")
+    for idx, b in enumerate(boxes):
+        print(f"  Raw Box {idx}: {b}")
     filtered_boxes = []
     for b in boxes:
         x, y, w, h = b
@@ -97,6 +100,9 @@ def _get_dynamic_zones(warped):
             
     top_tables = [b for b in filtered_boxes if b[1] < 1400 and b[3] > 600]
     bottom_tables = [b for b in filtered_boxes if b[1] >= 1400 and b[3] > 600]
+    print(f"DEBUG _get_dynamic_zones: found {len(top_tables)} top tables, {len(bottom_tables)} bottom tables")
+    for idx, b in enumerate(bottom_tables):
+        print(f"  Bottom table {idx}: {b}")
     
     top_tables.sort(key=lambda b: b[0])
     
@@ -395,94 +401,84 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> lis
 
     h_img, w_img = warped.shape[:2]
 
-    # 1. Find the Y coordinates using left timing marks
-    contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    t_marks = []
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        aspect_ratio = w / float(h + 1e-6)
-        if 800 < w * h < 12000 and x < w_img * 0.15: # Target left edge
-            hull = cv2.convexHull(cnt)
-            hull_area = cv2.contourArea(hull)
-            if hull_area > 0:
-                solidity = float(cv2.contourArea(cnt)) / hull_area
-                if solidity > 0.9 and 1.0 < aspect_ratio < 2.0:
-                    # Also need to make sure the inside is completely dark
-                    roi = warped[y:y+h, x:x+w]
-                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
-                    if np.mean(gray_roi) < 100:
-                        t_marks.append((x, y, w, h))
-
-    t_marks.sort(key=lambda m: m[1])
-    # Each row is vertically centered to the tracking mark
-    raw_row_centers = [y + h // 2 for (x, y, w, h) in t_marks]
+    # Find ALL bubbles
+    b_contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    bubble_xs = []
+    bubble_ys = []
     
-    # Cluster row centers (radius 20px) to merge duplicate contours of the same mark
-    row_centers = []
-    if raw_row_centers:
-        raw_row_centers.sort()
-        current_rc = [raw_row_centers[0]]
-        for i in range(1, len(raw_row_centers)):
-            if raw_row_centers[i] - raw_row_centers[i-1] < 20:
-                current_rc.append(raw_row_centers[i])
+    for cnt in b_contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        area = w * h
+        # Relaxed area constraint for slightly blurry or different sized bubbles
+        if 800 < area < 12000 and 0.5 < (w / (h + 1e-6)) < 2.0:
+            peri = cv2.arcLength(cnt, True)
+            if peri > 0:
+                circ = 4 * np.pi * (cv2.contourArea(cnt) / (peri * peri))
+                # Relaxed circularity for filled-in bubbles that look blobby
+                if 0.4 < circ <= 1.5:
+                    bubble_xs.append(x + w // 2)
+                    bubble_ys.append(y + h // 2)
+                    
+    # Cluster Y coordinates (rows)
+    bubble_ys.sort()
+    y_clusters = []
+    if bubble_ys:
+        current_cluster = [bubble_ys[0]]
+        for i in range(1, len(bubble_ys)):
+            if bubble_ys[i] - bubble_ys[i-1] < 25: # 25px radius
+                current_cluster.append(bubble_ys[i])
             else:
-                row_centers.append(int(np.median(current_rc)))
-                current_rc = [raw_row_centers[i]]
-        row_centers.append(int(np.median(current_rc)))
+                y_clusters.append(int(np.median(current_cluster)))
+                current_cluster = [bubble_ys[i]]
+        y_clusters.append(int(np.median(current_cluster)))
+        
+    # We only care about Y clusters that have enough bubbles in them
+    b_ys_arr = np.array(bubble_ys)
+    valid_y_clusters = []
+    for cluster_y in y_clusters:
+        count = np.sum(np.abs(b_ys_arr - cluster_y) < 25)
+        if count >= 3: # At least a few bubbles in this row to be confident it's a row
+            valid_y_clusters.append(cluster_y)
+            
+    row_centers = valid_y_clusters
+    print(f"DEBUG fallback: extracted {len(row_centers)} row centers from bubbles.")
 
-    print(f"Row Centers ({len(row_centers)}): {row_centers}")
     if len(row_centers) == 0:
-        return answers # Failed completely
+        return answers
 
     rows_count = len(row_centers)
     num_cols = (total_questions + rows_count - 1) // rows_count
 
-    # 2. Find the X coordinates using perfectly printed bubbles
-    b_contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    bubble_xs = []
-    for cnt in b_contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        area = w * h
-        if 3000 < area < 8000 and 0.8 < (w / (h + 1e-6)) < 1.2:
-            peri = cv2.arcLength(cnt, True)
-            if peri > 0:
-                circ = 4 * np.pi * (cv2.contourArea(cnt) / (peri * peri))
-                if 0.8 < circ <= 1.2:
-                    bubble_xs.append(x + w // 2)
-
-    if len(bubble_xs) < num_cols * 4: # Not enough valid shapes
-        return answers
-
-    # Cluster X coordinates (radius 20px)
+    # Cluster X coordinates
     bubble_xs.sort()
-    clusters = []
-    current_cluster = [bubble_xs[0]]
-    for i in range(1, len(bubble_xs)):
-        if bubble_xs[i] - bubble_xs[i-1] < 20: 
-            current_cluster.append(bubble_xs[i])
-        else:
-            clusters.append(int(np.median(current_cluster)))
-            current_cluster = [bubble_xs[i]]
-    clusters.append(int(np.median(current_cluster)))
+    x_clusters = []
+    if bubble_xs:
+        current_cluster = [bubble_xs[0]]
+        for i in range(1, len(bubble_xs)):
+            if bubble_xs[i] - bubble_xs[i-1] < 25: 
+                current_cluster.append(bubble_xs[i])
+            else:
+                x_clusters.append(int(np.median(current_cluster)))
+                current_cluster = [bubble_xs[i]]
+        x_clusters.append(int(np.median(current_cluster)))
 
     b_xs_arr = np.array(bubble_xs)
-    valid_clusters = []
-    for cluster_x in clusters:
-        # Require cluster to appear in at least 25% of rows
-        count = np.sum(np.abs(b_xs_arr - cluster_x) < 20)
-        if count >= max(1, rows_count * 0.25):
-            valid_clusters.append(cluster_x)
+    valid_x_clusters = []
+    for cluster_x in x_clusters:
+        count = np.sum(np.abs(b_xs_arr - cluster_x) < 25)
+        if count >= max(1, rows_count * 0.15): # Appears in at least 15% of rows
+            valid_x_clusters.append(cluster_x)
             
-    valid_clusters.sort()
+    x_grid = valid_x_clusters
+    print(f"DEBUG fallback: extracted {len(x_grid)} X columns from bubbles.")
+    
     expected_cols = num_cols * 4
-    if len(valid_clusters) < expected_cols:
-        return answers
+    if len(x_grid) < expected_cols:
+        print(f"DEBUG fallback: Warn: Found {len(x_grid)} X columns, expected {expected_cols}")
         
-    x_grid = valid_clusters[:expected_cols]
-    print(f"Total valid clusters: {len(valid_clusters)}. First 16: {valid_clusters[:16]}")
-    print(f"Selected x_grid ({len(x_grid)}): {x_grid}")
+    if not x_grid:
+        return answers
 
-    # Draw debug points
     debug_img = warped.copy()
     if len(debug_img.shape) == 2:
         debug_img = cv2.cvtColor(debug_img, cv2.COLOR_GRAY2BGR)
@@ -491,6 +487,7 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> lis
     for q in range(total_questions):
         c_idx = q // rows_count
         r_idx = q % rows_count
+        
         if r_idx >= len(row_centers): continue
             
         cy = row_centers[r_idx]
@@ -509,16 +506,13 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int) -> lis
             cv2.rectangle(debug_img, (roi_x1, roi_y1), (roi_x2, roi_y2), (0, 0, 255), 2)
             
             d = _get_bubble_density(warped[roi_y1:roi_y2, roi_x1:roi_x2])
-            if d > 0.2:
-                print(f"Q{q} Opt{opt}: density={d:.2f}, cx={cx}, cy={cy}")
-
             if d > 0.25 and d > max_density:
                 max_density = d
                 marked_opt = opt
                 
         answers[q] = marked_opt
         
-    cv2.imwrite("debug_rois_normal.jpg", debug_img)
+    # cv2.imwrite("debug_rois_fallback.jpg", debug_img)
     return answers
 class OMRProcessor:
     """
@@ -562,15 +556,18 @@ class OMRProcessor:
             # Find corner markers and warp
             markers = _find_corner_markers(blurred)
             if markers is None:
+                print("DEBUG: No corner markers found, using resize fallback")
                 aspect = gray.shape[0] / float(gray.shape[1])
                 target_h = int(self.sheet_width * aspect)
                 warped = cv2.resize(gray, (self.sheet_width, target_h))
             else:
+                print("DEBUG: Corner markers found, applying perspective transform")
                 warped = _warp_perspective(img, markers)
                 if len(warped.shape) == 3:
                     warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
 
             h, w = warped.shape
+            print(f"DEBUG: warped shape is {h}x{w}")
 
             # Extract zones dynamically using HTML table tracking
             zones = _get_dynamic_zones(warped)
