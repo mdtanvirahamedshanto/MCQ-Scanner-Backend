@@ -137,6 +137,7 @@ class ExamCreateRequest(BaseModel):
     negative_marking: bool = False
     negative_value: float = Field(default=0.0, ge=0, le=10)
     options_per_question: int = Field(default=4, ge=4, le=5)
+    template_type: str = Field(default="auto", max_length=50)
 
     @model_validator(mode="after")
     def validate_set_configuration(self):
@@ -160,6 +161,7 @@ class ExamUpdateRequest(BaseModel):
     negative_marking: Optional[bool] = None
     negative_value: Optional[float] = Field(default=None, ge=0, le=10)
     options_per_question: Optional[int] = Field(default=None, ge=4, le=5)
+    template_type: Optional[str] = Field(default=None, max_length=50)
     status: Optional[str] = Field(default=None, pattern="^(draft|active|archived)$")
 
 
@@ -181,6 +183,7 @@ class ExamResponse(BaseModel):
     negative_marking: bool
     negative_value: float
     mark_per_question: float
+    template_type: str
     status: str
     created_at: datetime
     set_labels: List[ExamSetResponse]

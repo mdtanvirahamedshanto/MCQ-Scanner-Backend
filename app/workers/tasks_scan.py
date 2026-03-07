@@ -129,6 +129,7 @@ async def _process_scan_job(job_id: int) -> None:
                 str(file_path),
                 num_questions=exam.total_questions,
                 use_bengali_set_codes=use_bengali,
+                template_type=getattr(exam, "template_type", "auto"),
             )
 
             if not omr.success:

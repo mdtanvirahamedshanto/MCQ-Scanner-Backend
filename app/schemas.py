@@ -127,6 +127,7 @@ class ExamCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     subject_code: str = Field(..., min_length=1, max_length=50)
     total_questions: int = Field(default=60, ge=1, le=100)
+    template_type: str = Field(default="auto", max_length=50)
     answer_keys: Optional[List[AnswerKeySet]] = None
     # Frontend format: single answer_key as {question_no: "A"|"B"|"C"|"D"}
     answer_key: Optional[Dict[Union[str, int], str]] = None
@@ -156,6 +157,7 @@ class ExamResponse(BaseModel):
     title: str
     subject_code: str
     total_questions: int
+    template_type: str
     date_created: datetime
 
     class Config:

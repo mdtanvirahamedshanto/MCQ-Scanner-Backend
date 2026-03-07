@@ -184,6 +184,7 @@ class Exam(Base):
     negative_marking = Column(Boolean, default=False)
     negative_value = Column(Float, default=0.0)
     mark_per_question = Column(Float, default=1.0)
+    template_type = Column(String(50), default="auto", nullable=False)
     status = Column(String(20), default="draft")
 
     date_created = Column(DateTime, default=datetime.utcnow)

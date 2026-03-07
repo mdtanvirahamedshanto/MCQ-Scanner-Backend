@@ -700,11 +700,13 @@ class OMRProcessor:
         sheet_height: int = SHEET_HEIGHT,
         total_questions: int = TOTAL_QUESTIONS,
         use_bengali_set_codes: bool = True,
+        template_type: str = "auto",
     ):
         self.sheet_width = sheet_width
         self.sheet_height = sheet_height
         self.total_questions = total_questions
         self.use_bengali_set_codes = use_bengali_set_codes
+        self.template_type = template_type
 
     def process(self, image_path: Union[str, Path]) -> OMRResult:
         """
@@ -743,6 +745,60 @@ class OMRProcessor:
 
             h, w = warped.shape
             print(f"DEBUG: warped shape is {h}x{w}")
+
+            if self.template_type == "20q_mcq_png":
+                result.roll_number = ""
+                result.set_code = ""
+                answers = [-1] * self.total_questions
+                bubbles_detected = 0
+                
+                if markers is not None:
+                    y_centers = [925, 1032, 1143, 1252, 1360, 1465, 1580, 1688, 1792, 1904]
+                    x_cols = [
+                        [393, 627, 856, 1094],
+                        [1741, 1975, 2209, 2443]
+                    ]
+                    
+                    for q in range(min(self.total_questions, 20)):
+                        c_idx = q // 10
+                        r_idx = q % 10
+                        if c_idx >= 2:
+                            continue
+                            
+                        cy = y_centers[r_idx]
+                        xs = x_cols[c_idx]
+                        
+                        densities = []
+                        for cx in xs:
+                            box_r = 20
+                            roi_y1, roi_y2 = max(0, cy - box_r), min(h, cy + box_r)
+                            roi_x1, roi_x2 = max(0, cx - box_r), min(w, cx + box_r)
+                            roi = warped[roi_y1:roi_y2, roi_x1:roi_x2]
+                            d = _get_bubble_density(roi)
+                            densities.append(d)
+                            
+                        max_d = max(densities) if densities else 0
+                        if max_d >= 0.17: # Threshold for marking
+                            sorted_d = sorted(densities, reverse=True)
+                            # Relaxed ambiguity: only ambiguous if both are very close AND very high
+                            is_ambiguous = (len(sorted_d) > 1 and 
+                                           sorted_d[1] > 0.15 and 
+                                           (sorted_d[0] - sorted_d[1] < 0.08) and
+                                           sorted_d[0] < 0.8)
+                            
+                            if is_ambiguous:
+                                answers[q] = -1 # Ambiguous
+                            else:
+                                answers[q] = densities.index(max_d)
+                                bubbles_detected += 1
+                
+                result.answers = answers
+                if bubbles_detected == 0:
+                    result.error_message = "No bubbles detected in the image"
+                    raise NoBubblesDetectedError(result.error_message)
+
+                result.success = True
+                return result
 
             # Extract zones dynamically using HTML table tracking
             zones = _get_dynamic_zones(warped)
@@ -870,6 +926,7 @@ def process_omr_image(
     image_path: Union[str, Path],
     num_questions: int = 60,
     use_bengali_set_codes: bool = True,
+    template_type: str = "auto",
 ) -> OMRResult:
     """
     Convenience function - process OMR sheet image.
@@ -877,6 +934,7 @@ def process_omr_image(
     processor = OMRProcessor(
         total_questions=num_questions,
         use_bengali_set_codes=use_bengali_set_codes,
+        template_type=template_type,
     )
     return processor.process(image_path)
 

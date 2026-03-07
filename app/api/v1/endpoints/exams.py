@@ -136,6 +136,7 @@ async def create_exam(
         negative_marking=payload.negative_marking,
         negative_value=payload.negative_value,
         mark_per_question=1.0,
+        template_type=payload.template_type,
         status="draft",
     )
     db.add(exam)
@@ -532,6 +533,7 @@ async def evaluate_omr_sheet(
         str(image_path),
         num_questions=exam.total_questions,
         use_bengali_set_codes=use_bengali,
+        template_type=getattr(exam, "template_type", "auto"),
     )
 
     if not omr_result.success:

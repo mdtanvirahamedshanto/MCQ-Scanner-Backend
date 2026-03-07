@@ -76,6 +76,7 @@ async def create_exam(
         title=exam_data.title,
         subject_code=exam_data.subject_code,
         total_questions=exam_data.total_questions,
+        template_type=getattr(exam_data, "template_type", "auto"),
     )
     db.add(exam)
     await db.flush()
@@ -178,6 +179,7 @@ async def bulk_scan_omr(
             filepath,
             num_questions=exam.total_questions,
             use_bengali_set_codes=use_bengali_set_codes,
+            template_type=getattr(exam, "template_type", "auto"),
         )
 
         if not omr_result.success:

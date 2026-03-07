@@ -114,6 +114,7 @@ async def scan_omr(
         str(image_path),
         num_questions=exam.total_questions,
         use_bengali_set_codes=use_bengali_set_codes,
+        template_type=getattr(exam, "template_type", "auto"),
     )
 
     if not omr_result.success:
