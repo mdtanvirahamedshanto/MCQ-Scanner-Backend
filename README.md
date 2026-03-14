@@ -141,6 +141,19 @@ python scripts/create_admin.py admin@example.com mypassword
 python scripts/create_admin.py
 ```
 
+### 8. Train 20Q MCQ profile (recommended for camera scans)
+
+If you use the custom template type `20q_mcq_png`, calibrate it from sample photos/scans:
+
+```bash
+cd backend
+venv/bin/python train_20q_profile.py \
+  --images rawmcq.jpeg camscannermcq.jpeg mcq.png \
+  --output app/utils/profiles/20q_mcq_png_profile.json
+```
+
+Optional: set `OMR_20Q_PROFILE_PATH` to load a custom profile file at runtime.
+
 ---
 
 ## API Endpoints

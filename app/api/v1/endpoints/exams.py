@@ -73,6 +73,7 @@ def _exam_response(exam: Exam) -> ExamResponse:
         mark_per_question=float(exam.mark_per_question or 1.0),
         status=exam.status or "draft",
         created_at=exam.date_created,
+        template_type=exam.template_type or "auto",
         set_labels=_exam_set_response(exam),
     )
 

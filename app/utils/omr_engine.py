@@ -10,6 +10,8 @@ Implements:
 - Error handling: "No bubbles detected", "Image too blurry"
 """
 
+import json
+import os
 import cv2
 import numpy as np
 from imutils.perspective import four_point_transform
@@ -64,11 +66,139 @@ ENGLISH_SET_CODES = ["A", "B", "C", "D", "E", "F"]
 # Blur detection threshold (Laplacian variance) - lower = blurrier
 BLUR_THRESHOLD = 20
 
+# 20Q custom template defaults (derived from mcq.png warped baseline: 2480x2289)
+_DEFAULT_20Q_Y = [925, 1032, 1143, 1252, 1360, 1465, 1580, 1688, 1792, 1904]
+_DEFAULT_20Q_X = [
+    [393, 627, 856, 1094],
+    [1741, 1975, 2209, 2443],
+]
+_DEFAULT_20Q_REF_W = 2480
+_DEFAULT_20Q_REF_H = 2289
+_DEFAULT_20Q_PROFILE = {
+    "y_centers_norm": [v / _DEFAULT_20Q_REF_H for v in _DEFAULT_20Q_Y],
+    "x_cols_norm": [[v / _DEFAULT_20Q_REF_W for v in col] for col in _DEFAULT_20Q_X],
+    "roi_half_w_norm": 20 / _DEFAULT_20Q_REF_W,
+    "roi_half_h_norm": 20 / _DEFAULT_20Q_REF_H,
+    "mark_threshold": 0.17,
+    "ambiguity_second_min": 0.18,
+    "ambiguity_gap_max": 0.06,
+    "ambiguity_peak_cap": 0.80,
+}
+_PROFILE_20Q_CACHE: Optional[Dict[str, object]] = None
+_PROFILE_20Q_CACHE_KEY: Optional[Tuple[str, Optional[float]]] = None
+
+
+def _resolve_20q_profile_path() -> Path:
+    override = os.getenv("OMR_20Q_PROFILE_PATH", "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent / "profiles" / "20q_mcq_png_profile.json"
+
+
+def _validate_20q_profile(raw: Dict[str, object]) -> Optional[Dict[str, object]]:
+    try:
+        y_norm = raw.get("y_centers_norm")
+        x_norm = raw.get("x_cols_norm")
+        if not isinstance(y_norm, list) or len(y_norm) != 10:
+            return None
+        if not isinstance(x_norm, list) or len(x_norm) != 2:
+            return None
+        if not all(isinstance(v, (int, float)) for v in y_norm):
+            return None
+        if not all(isinstance(col, list) and len(col) == 4 for col in x_norm):
+            return None
+        if not all(isinstance(v, (int, float)) for col in x_norm for v in col):
+            return None
+
+        y_vals = [float(v) for v in y_norm]
+        y_gaps = [y_vals[i + 1] - y_vals[i] for i in range(len(y_vals) - 1)]
+        if any(g <= 0.02 or g >= 0.10 for g in y_gaps):
+            return None
+
+        x_left = [float(v) for v in x_norm[0]]
+        x_right = [float(v) for v in x_norm[1]]
+        if sorted(x_left) != x_left or sorted(x_right) != x_right:
+            return None
+        if x_right[0] - x_left[-1] < 0.08:
+            return None
+
+        profile = dict(_DEFAULT_20Q_PROFILE)
+        profile["y_centers_norm"] = [float(np.clip(v, 0.0, 1.0)) for v in y_norm]
+        profile["x_cols_norm"] = [
+            [float(np.clip(v, 0.0, 1.0)) for v in col]
+            for col in x_norm
+        ]
+
+        for key in (
+            "roi_half_w_norm",
+            "roi_half_h_norm",
+            "mark_threshold",
+            "ambiguity_second_min",
+            "ambiguity_gap_max",
+            "ambiguity_peak_cap",
+        ):
+            if isinstance(raw.get(key), (int, float)):
+                profile[key] = float(raw[key])
+        return profile
+    except Exception:
+        return None
+
+
+def _load_20q_profile() -> Dict[str, object]:
+    global _PROFILE_20Q_CACHE
+    global _PROFILE_20Q_CACHE_KEY
+
+    path = _resolve_20q_profile_path()
+    mtime: Optional[float] = None
+    if path.exists():
+        try:
+            mtime = path.stat().st_mtime
+        except Exception:
+            mtime = None
+
+    cache_key = (str(path), mtime)
+    if _PROFILE_20Q_CACHE is not None and _PROFILE_20Q_CACHE_KEY == cache_key:
+        return _PROFILE_20Q_CACHE
+
+    profile = dict(_DEFAULT_20Q_PROFILE)
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            validated = _validate_20q_profile(raw if isinstance(raw, dict) else {})
+            if validated is not None:
+                profile = validated
+                print(f"DEBUG: Loaded 20Q profile from {path}")
+        except Exception as e:
+            print(f"DEBUG: Failed to load 20Q profile {path}: {e}")
+
+    _PROFILE_20Q_CACHE = profile
+    _PROFILE_20Q_CACHE_KEY = cache_key
+    return profile
+
+
+def _build_20q_runtime_grid(profile: Dict[str, object], warped_h: int, warped_w: int) -> Tuple[List[int], List[List[int]], int, int]:
+    y_norm = profile["y_centers_norm"]
+    x_norm = profile["x_cols_norm"]
+    y_centers = [int(np.clip(round(float(v) * warped_h), 0, max(0, warped_h - 1))) for v in y_norm]
+    x_cols = [
+        [int(np.clip(round(float(v) * warped_w), 0, max(0, warped_w - 1))) for v in col]
+        for col in x_norm
+    ]
+
+    roi_half_w = max(12, int(round(float(profile["roi_half_w_norm"]) * warped_w)))
+    roi_half_h = max(12, int(round(float(profile["roi_half_h_norm"]) * warped_h)))
+    return y_centers, x_cols, roi_half_w, roi_half_h
+
+
 def _get_dynamic_zones(warped):
     gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY) if len(warped.shape) == 3 else warped
     thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 10
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 5
     )
+    
+    # Morphological dilation to bridge gaps in table borders (often weak in mobile photos)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    thresh = cv2.dilate(thresh, kernel, iterations=1)
     
     contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -98,20 +228,18 @@ def _get_dynamic_zones(warped):
         if not is_inside:
             filtered_boxes.append(b)
             
-    top_tables = [b for b in filtered_boxes if b[1] < 1400 and b[3] > 300]
-    bottom_tables = [b for b in filtered_boxes if b[1] >= 1400 and b[3] > 300]
+    top_tables = [b for b in filtered_boxes if b[1] < warped.shape[0] * 0.45 and b[3] > 150]
+    bottom_tables = [b for b in filtered_boxes if b[1] >= warped.shape[0] * 0.45 and b[3] > 150]
     print(f"DEBUG _get_dynamic_zones: found {len(top_tables)} top tables, {len(bottom_tables)} bottom tables")
-    for idx, b in enumerate(bottom_tables):
-        print(f"  Bottom table {idx}: {b}")
     
     top_tables.sort(key=lambda b: b[0])
     
     roll_box = None
     set_code_box = None
     
-    if len(top_tables) >= 3:
-        set_code_box = top_tables[-1] # Right-most
-        roll_box = max(top_tables, key=lambda b: b[2]) # Widest
+    if len(top_tables) >= 2:
+        set_code_box = top_tables[-1] 
+        roll_box = top_tables[0]
         
     bottom_tables.sort(key=lambda b: b[0])
     
@@ -156,8 +284,12 @@ def _preprocess_image(img: np.ndarray) -> np.ndarray:
     else:
         gray = img.copy()
 
-    # Step 2: Gaussian Blur - reduces noise for better edge detection
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    # Step 2: Contrast Enhancement (CLAHE) - very effective for shadows/mobile photos
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray_balanced = clahe.apply(gray)
+
+    # Step 3: Gaussian Blur - reduces noise for better edge detection
+    blurred = cv2.GaussianBlur(gray_balanced, (5, 5), 0)
 
     return blurred
 
@@ -165,91 +297,110 @@ def _preprocess_image(img: np.ndarray) -> np.ndarray:
 def _find_corner_markers(gray: np.ndarray) -> Optional[np.ndarray]:
     """
     Find the four black square corner markers using:
+    - Multi-threshold adaptive thresholding
     - Canny Edge Detection
     - Contour detection
     Returns ordered points: top-left, top-right, bottom-right, bottom-left.
     """
-    # Adaptive Threshold - robust for varying lighting
-    thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 10
-    )
-
-    # Canny Edge Detection
-    edges = cv2.Canny(gray, 50, 150)
-
-    # Combine: use both for robustness
-    combined = cv2.bitwise_or(thresh, edges)
-    kernel = np.ones((3, 3), np.uint8)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
-
-    contours, _ = cv2.findContours(
-        combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-
     h, w = gray.shape
     total_area = h * w
-    candidates = []
-
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if MARKER_MIN_AREA_RATIO * total_area < area < MARKER_MAX_AREA_RATIO * total_area:
-            peri = cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-            if len(approx) == 4:
-                x, y, w_rect, h_rect = cv2.boundingRect(approx)
-                aspect = max(w_rect, h_rect) / (min(w_rect, h_rect) + 1e-6)
-                if 0.5 < aspect < 2.0:
-                    candidates.append((area, approx))
-
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    centers = []
-    for c in candidates:
-        approx = c[1] # shape (4, 1, 2)
-        pts_2d = approx.reshape(-1, 2)
-        center = pts_2d.mean(axis=0)
-        
-        # Filter duplicates (e.g., inner/outer contours of the same square)
-        is_duplicate = False
-        for existing in centers:
-            if np.linalg.norm(center - existing) < 50:
-                is_duplicate = True
-                break
-                
-        if not is_duplicate:
-            centers.append(center)
-            if len(centers) == 10:  # Take up to top 10 distinct shapes
-                break
-
-    if len(centers) < 4:
-        return None
-        
-    import itertools
-    max_quad_area = 0
-    best_quad = None
     
-    for quad_indices in itertools.combinations(range(len(centers)), 4):
-        quad_pts = np.array([centers[i] for i in quad_indices], dtype=np.float32)
-        ordered = _order_points(quad_pts)
+    # Try multiple thresholds for robustness
+    for t_val in [3, 7, 11, 15]:
+        thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, t_val
+        )
+        edges = cv2.Canny(gray, 50, 150)
+        combined = cv2.bitwise_or(thresh, edges)
+        kernel = np.ones((3, 3), np.uint8)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
         
-        # Calculate polygon area of the 4 points
-        # area = 0.5 * |(x1y2 - y1x2) + (x2y3 - y2x3) + (x3y4 - y3x4) + (x4y1 - y4x1)|
-        x, y = ordered[:, 0], ordered[:, 1]
-        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
-        
-        if area > max_quad_area:
-            max_quad_area = area
-            best_quad = ordered
-            
-    if best_quad is None:
-        return None
-        
-    # The markers must enclose a significant portion of the document (at least 45%).
-    # If it's less, it's a false positive (e.g. internal checkbox grid).
-    if max_quad_area < 0.45 * total_area:
-        return None
+        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
 
-    return best_quad.astype(np.float32)
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if MARKER_MIN_AREA_RATIO * total_area < area < MARKER_MAX_AREA_RATIO * total_area:
+                peri = cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+                if len(approx) == 4:
+                    x, y, w_rect, h_rect = cv2.boundingRect(approx)
+                    aspect = max(w_rect, h_rect) / (min(w_rect, h_rect) + 1e-6)
+                    if 0.4 < aspect < 2.5:
+                        candidates.append((area, approx))
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        centers = []
+        for c in candidates:
+            approx = c[1]
+            pts_2d = approx.reshape(-1, 2)
+            center = pts_2d.mean(axis=0)
+            is_duplicate = False
+            for existing in centers:
+                if np.linalg.norm(center - existing) < 50:
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                centers.append(center)
+                if len(centers) == 10: break
+
+        if len(centers) >= 4:
+            import itertools
+            max_quad_area = 0
+            best_quad = None
+            for quad_indices in itertools.combinations(range(len(centers)), 4):
+                quad_pts = np.array([centers[i] for i in quad_indices], dtype=np.float32)
+                ordered = _order_points(quad_pts)
+                x, y = ordered[:, 0], ordered[:, 1]
+                area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                if area > max_quad_area:
+                    max_quad_area = area
+                    best_quad = ordered
+            
+            if best_quad is not None and max_quad_area > 0.40 * total_area:
+                return best_quad.astype(np.float32)
+
+    # Local Corner Search Fallback: If global search fails, look specifically at image corners
+    print("DEBUG: Global marker search failed, trying local corner search...")
+    corners = []
+    # top-left, top-right, bottom-right, bottom-left
+    corner_regions = [
+        (0, 0, w//3, h//3),
+        (2*w//3, 0, w//3, h//3),
+        (2*w//3, 2*h//3, w//3, h//3),
+        (0, 2*h//3, w//3, h//3)
+    ]
+    
+    found_points = []
+    for (cx, cy, cw, ch) in corner_regions:
+        roi = gray[cy:cy+ch, cx:cx+cw]
+        best_local_area = 0
+        best_local_pt = None
+        
+        for t_val in [3, 7, 11, 15]:
+            thresh = cv2.adaptiveThreshold(roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, t_val)
+            cnts, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in cnts:
+                area = cv2.contourArea(cnt)
+                if (cw*ch)*0.005 < area < (cw*ch)*0.15:
+                    peri = cv2.arcLength(cnt, True)
+                    approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+                    if len(approx) == 4:
+                        pts = approx.reshape(-1, 2)
+                        center = pts.mean(axis=0)
+                        if area > best_local_area:
+                            best_local_area = area
+                            best_local_pt = center + [cx, cy]
+            if best_local_pt is not None: break
+        
+        if best_local_pt is not None:
+            found_points.append(best_local_pt)
+            
+    if len(found_points) == 4:
+        print("DEBUG: Local corner search SUCCEEDED!")
+        return _order_points(np.array(found_points, dtype=np.float32))
+
+    return None
 
 def _warp_perspective(img: np.ndarray, src_pts: np.ndarray, target_width: int = SHEET_WIDTH) -> np.ndarray:
     """Apply perspective transform for top-down view using imutils."""
@@ -479,7 +630,7 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int, column
     answers = [-1] * total_questions
     gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY) if len(warped.shape) == 3 else warped.copy()
     thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 10
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 5
     )
 
     h_img, w_img = warped.shape[:2]
@@ -493,11 +644,11 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int, column
     for cnt in b_contours:
         x, y, w, h = cv2.boundingRect(cnt)
         area = w * h
-        if 800 < area < 12000 and 0.5 < (w / (h + 1e-6)) < 2.0:
+        if 400 < area < 20000 and 0.4 < (w / (h + 1e-6)) < 2.5:
             peri = cv2.arcLength(cnt, True)
             if peri > 0:
                 circ = 4 * np.pi * (cv2.contourArea(cnt) / (peri * peri))
-                if 0.4 < circ <= 1.5:
+                if 0.2 < circ <= 1.8:
                     bubble_ys.append(y + h // 2)
 
     # PASS 2: Loose constraints for X-axis (Column offsets)
@@ -518,25 +669,36 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int, column
     bubble_ys.sort()
     y_clusters = []
     if bubble_ys:
+        # Use a distance relative to image height (approx 1% of height is a good cluster radius for rows)
+        dist_thresh = max(15, int(h_img * 0.012))
         current_cluster = [bubble_ys[0]]
         for i in range(1, len(bubble_ys)):
-            if bubble_ys[i] - bubble_ys[i-1] < 25: # 25px radius
+            if bubble_ys[i] - bubble_ys[i-1] < dist_thresh: 
                 current_cluster.append(bubble_ys[i])
             else:
                 y_clusters.append(int(np.median(current_cluster)))
                 current_cluster = [bubble_ys[i]]
         y_clusters.append(int(np.median(current_cluster)))
+    
+    y_clusters.sort()
+    
+    # Structural interpolation: Fill in missing rows
+    if len(y_clusters) >= 5:
+        diffs = np.diff(y_clusters)
+        median_gap = np.median(diffs)
         
-    # We only care about Y clusters that have enough bubbles in them
-    b_ys_arr = np.array(bubble_ys)
-    valid_y_clusters = []
-    for cluster_y in y_clusters:
-        count = np.sum(np.abs(b_ys_arr - cluster_y) < 25)
-        if count >= 3: # At least a few bubbles in this row to be confident it's a row
-            valid_y_clusters.append(cluster_y)
-            
-    row_centers = valid_y_clusters
-    print(f"DEBUG fallback: extracted {len(row_centers)} row centers from bubbles.")
+        refined_y = [y_clusters[0]]
+        for i in range(len(diffs)):
+            gap = diffs[i]
+            num_missing = int(round(gap / median_gap)) - 1
+            if num_missing > 0 and num_missing < 5:
+                for j in range(1, num_missing + 1):
+                    refined_y.append(int(y_clusters[i] + j * (gap / (num_missing + 1))))
+            refined_y.append(y_clusters[i+1])
+        y_clusters = refined_y
+        
+    row_centers = y_clusters
+    print(f"DEBUG fallback: extracted {len(row_centers)} structural row centers.")
 
     if len(row_centers) == 0:
         return answers
@@ -580,15 +742,16 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int, column
                 current_cluster = [bubble_xs[i]]
         x_clusters.append(int(np.median(current_cluster)))
 
+    # Filter X-grid: Keep only columns that have a reasonable number of bubbles
     b_xs_arr = np.array(bubble_xs)
     valid_x_clusters = []
-    for cluster_x in x_clusters:
+    for cluster_x in sorted(x_clusters):
         count = np.sum(np.abs(b_xs_arr - cluster_x) < 25)
-        if count >= max(1, rows_count * 0.15): # Appears in at least 15% of rows
+        if count >= max(1, len(row_centers) * 0.1): # At least 10% of rows have a bubble here
             valid_x_clusters.append(cluster_x)
             
     x_grid = valid_x_clusters
-    print(f"DEBUG fallback: extracted {len(x_grid)} X columns from bubbles.")
+    print(f"DEBUG fallback: extracted {len(x_grid)} filtered X column candidates.")
     
     if not x_grid:
         return answers
@@ -663,29 +826,28 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int, column
         if r_idx >= len(row_centers): continue
             
         cy = row_centers[r_idx]
-        max_density = 0
-        marked_opt = -1
-        
+        densities = []
         for opt in range(4):
             x_idx = c_idx * 4 + opt
-            if x_idx >= len(x_grid): continue
+            if x_idx >= len(x_grid):
+                densities.append(0.0)
+                continue
             cx = x_grid[x_idx]
+            box_r = 18
+            ry1, ry2 = max(0, cy - box_r), min(h_img, cy + box_r)
+            rx1, rx2 = max(0, cx - box_r), min(w_img, cx + box_r)
+            cv2.rectangle(debug_img, (rx1, ry1), (rx2, ry2), (0, 0, 255), 2)
+            crop = 255 - gray[ry1:ry2, rx1:rx2]
+            densities.append(np.mean(crop) / 255.0)
             
-            box_r = 18  # Tighter radius to focus on pencil fill, avoiding empty bubble borders
-            roi_y1, roi_y2 = max(0, cy - box_r), min(h_img, cy + box_r)
-            roi_x1, roi_x2 = max(0, cx - box_r), min(w_img, cx + box_r)
-            
-            cv2.rectangle(debug_img, (roi_x1, roi_y1), (roi_x2, roi_y2), (0, 0, 255), 2)
-            
-            # Use raw grayscale inverse mean for physical darkness instead of edge threshold
-            crop_gray = 255 - gray[roi_y1:roi_y2, roi_x1:roi_x2]
-            d = np.mean(crop_gray) / 255.0
-                
-            if d > 0.33 and d > max_density:  # Empty bubbles are around 0.20-0.30. Filled are 0.40-0.80
-                max_density = d
-                marked_opt = opt
-                    
-        answers[q] = marked_opt
+        if densities:
+            m_idx = np.argmax(densities)
+            m_d = densities[m_idx]
+            if m_d > 0.20:
+                avg_others = np.mean([d for i, d in enumerate(densities) if i != m_idx])
+                # Back to a slightly more lenient check for mobile photos
+                if m_d > avg_others * 1.15 or m_d > 0.35:
+                    answers[q] = m_idx
         
     cv2.imwrite("debug_rois_fallback.jpg", debug_img)
     return answers
@@ -751,46 +913,46 @@ class OMRProcessor:
                 result.set_code = ""
                 answers = [-1] * self.total_questions
                 bubbles_detected = 0
-                
-                if markers is not None:
-                    y_centers = [925, 1032, 1143, 1252, 1360, 1465, 1580, 1688, 1792, 1904]
-                    x_cols = [
-                        [393, 627, 856, 1094],
-                        [1741, 1975, 2209, 2443]
-                    ]
-                    
-                    for q in range(min(self.total_questions, 20)):
-                        c_idx = q // 10
-                        r_idx = q % 10
-                        if c_idx >= 2:
-                            continue
-                            
-                        cy = y_centers[r_idx]
-                        xs = x_cols[c_idx]
-                        
-                        densities = []
-                        for cx in xs:
-                            box_r = 20
-                            roi_y1, roi_y2 = max(0, cy - box_r), min(h, cy + box_r)
-                            roi_x1, roi_x2 = max(0, cx - box_r), min(w, cx + box_r)
-                            roi = warped[roi_y1:roi_y2, roi_x1:roi_x2]
-                            d = _get_bubble_density(roi)
-                            densities.append(d)
-                            
-                        max_d = max(densities) if densities else 0
-                        if max_d >= 0.17: # Threshold for marking
-                            sorted_d = sorted(densities, reverse=True)
-                            # Relaxed ambiguity: only ambiguous if both are very close AND very high
-                            is_ambiguous = (len(sorted_d) > 1 and 
-                                           sorted_d[1] > 0.15 and 
-                                           (sorted_d[0] - sorted_d[1] < 0.08) and
-                                           sorted_d[0] < 0.8)
-                            
-                            if is_ambiguous:
-                                answers[q] = -1 # Ambiguous
-                            else:
-                                answers[q] = densities.index(max_d)
-                                bubbles_detected += 1
+
+                profile = _load_20q_profile()
+                y_centers, x_cols, roi_half_w, roi_half_h = _build_20q_runtime_grid(profile, h, w)
+                mark_threshold = float(profile["mark_threshold"])
+                ambiguity_second_min = float(profile["ambiguity_second_min"])
+                ambiguity_gap_max = float(profile["ambiguity_gap_max"])
+                ambiguity_peak_cap = float(profile["ambiguity_peak_cap"])
+
+                for q in range(min(self.total_questions, 20)):
+                    c_idx = q // 10
+                    r_idx = q % 10
+                    if c_idx >= 2:
+                        continue
+
+                    cy = y_centers[r_idx]
+                    xs = x_cols[c_idx]
+
+                    densities = []
+                    for cx in xs:
+                        roi_y1, roi_y2 = max(0, cy - roi_half_h), min(h, cy + roi_half_h)
+                        roi_x1, roi_x2 = max(0, cx - roi_half_w), min(w, cx + roi_half_w)
+                        roi = warped[roi_y1:roi_y2, roi_x1:roi_x2]
+                        d = _get_bubble_density(roi)
+                        densities.append(d)
+
+                    max_d = max(densities) if densities else 0
+                    if max_d >= mark_threshold:
+                        sorted_d = sorted(densities, reverse=True)
+                        is_ambiguous = (
+                            len(sorted_d) > 1
+                            and sorted_d[1] > ambiguity_second_min
+                            and (sorted_d[0] - sorted_d[1] < ambiguity_gap_max)
+                            and sorted_d[0] < ambiguity_peak_cap
+                        )
+
+                        if is_ambiguous:
+                            answers[q] = -1
+                        else:
+                            answers[q] = densities.index(max_d)
+                            bubbles_detected += 1
                 
                 result.answers = answers
                 if bubbles_detected == 0:
