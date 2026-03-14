@@ -35,6 +35,7 @@ DEFAULT_Y_NORM = [
 ]
 DEFAULT_X_NORM = [
     [393 / DEFAULT_REF_W, 627 / DEFAULT_REF_W, 856 / DEFAULT_REF_W, 1094 / DEFAULT_REF_W],
+    [1067 / DEFAULT_REF_W, 1301 / DEFAULT_REF_W, 1530 / DEFAULT_REF_W, 1768 / DEFAULT_REF_W],
     [1741 / DEFAULT_REF_W, 1975 / DEFAULT_REF_W, 2209 / DEFAULT_REF_W, 2443 / DEFAULT_REF_W],
 ]
 
@@ -98,7 +99,7 @@ def _snap_to_bubble_center(
 
 def _estimate_mark_threshold(densities: List[float]) -> float:
     """Estimate mark threshold from density distribution using 1D k-means."""
-    if len(densities) < 20:
+    if len(densities) < 30:
         return 0.17
 
     arr = np.array(densities, dtype=np.float32)
@@ -151,12 +152,12 @@ def _calibrate_single_image(path: Path) -> dict:
     roi_half_h = max(12, int(round(h * (20 / DEFAULT_REF_H))))
 
     row_y: List[List[float]] = [[] for _ in range(10)]
-    col_x: List[List[List[float]]] = [[[] for _ in range(4)] for _ in range(2)]
+    col_x: List[List[List[float]]] = [[[] for _ in range(4)] for _ in range(3)]
     densities: List[float] = []
 
     for row in range(10):
         expected_y = int(round(DEFAULT_Y_NORM[row] * h))
-        for col in range(2):
+        for col in range(3):
             for opt in range(4):
                 expected_x = int(round(DEFAULT_X_NORM[col][opt] * w))
                 cx, cy = _snap_to_bubble_center(binary, expected_x, expected_y, search_radius)
@@ -173,7 +174,7 @@ def _calibrate_single_image(path: Path) -> dict:
 
     y_centers_norm = [float(np.median(vals)) if vals else DEFAULT_Y_NORM[i] for i, vals in enumerate(row_y)]
     x_cols_norm = []
-    for col in range(2):
+    for col in range(3):
         col_vals = []
         for opt in range(4):
             vals = col_x[col][opt]
@@ -212,7 +213,7 @@ def train_profile(images: List[Path]) -> dict:
             final_y[i] = min_allowed
 
     final_x = []
-    for col in range(2):
+    for col in range(3):
         col_vals = []
         for opt in range(4):
             vals = [s["x_cols_norm"][col][opt] for s in samples]

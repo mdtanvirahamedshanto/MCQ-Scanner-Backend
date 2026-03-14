@@ -99,9 +99,9 @@ def _validate_20q_profile(raw: Dict[str, object]) -> Optional[Dict[str, object]]
     try:
         y_norm = raw.get("y_centers_norm")
         x_norm = raw.get("x_cols_norm")
-        if not isinstance(y_norm, list) or len(y_norm) != 10:
+        if not isinstance(y_norm, list) or len(y_norm) < 10:
             return None
-        if not isinstance(x_norm, list) or len(x_norm) != 2:
+        if not isinstance(x_norm, list) or len(x_norm) < 2:
             return None
         if not all(isinstance(v, (int, float)) for v in y_norm):
             return None
@@ -843,11 +843,11 @@ def _extract_normal_omr_answers(warped: np.ndarray, total_questions: int, column
         if densities:
             m_idx = np.argmax(densities)
             m_d = densities[m_idx]
-            if m_d > 0.20:
+            if m_d > 0.15: # Refined threshold for mobile photos
                 avg_others = np.mean([d for i, d in enumerate(densities) if i != m_idx])
-                # Back to a slightly more lenient check for mobile photos
-                if m_d > avg_others * 1.15 or m_d > 0.35:
-                    answers[q] = m_idx
+                # Robust relative check
+                if m_d > avg_others * 1.15 or m_d > 0.30:
+                    answers[q] = int(m_idx)
         
     cv2.imwrite("debug_rois_fallback.jpg", debug_img)
     return answers
@@ -908,7 +908,7 @@ class OMRProcessor:
             h, w = warped.shape
             print(f"DEBUG: warped shape is {h}x{w}")
 
-            if self.template_type == "20q_mcq_png":
+            if self.template_type == "20q_mcq_png" and self.total_questions <= 20:
                 result.roll_number = ""
                 result.set_code = ""
                 answers = [-1] * self.total_questions
@@ -916,15 +916,14 @@ class OMRProcessor:
 
                 profile = _load_20q_profile()
                 y_centers, x_cols, roi_half_w, roi_half_h = _build_20q_runtime_grid(profile, h, w)
-                mark_threshold = float(profile["mark_threshold"])
-                ambiguity_second_min = float(profile["ambiguity_second_min"])
-                ambiguity_gap_max = float(profile["ambiguity_gap_max"])
-                ambiguity_peak_cap = float(profile["ambiguity_peak_cap"])
+                
+                num_rows = len(y_centers)
+                num_cols = len(x_cols)
 
-                for q in range(min(self.total_questions, 20)):
-                    c_idx = q // 10
-                    r_idx = q % 10
-                    if c_idx >= 2:
+                for q in range(self.total_questions):
+                    c_idx = q // num_rows
+                    r_idx = q % num_rows
+                    if c_idx >= num_cols:
                         continue
 
                     cy = y_centers[r_idx]
@@ -935,24 +934,20 @@ class OMRProcessor:
                         roi_y1, roi_y2 = max(0, cy - roi_half_h), min(h, cy + roi_half_h)
                         roi_x1, roi_x2 = max(0, cx - roi_half_w), min(w, cx + roi_half_w)
                         roi = warped[roi_y1:roi_y2, roi_x1:roi_x2]
-                        d = _get_bubble_density(roi)
+                        # Use robust mean intensity check
+                        crop = 255 - roi
+                        d = np.mean(crop) / 255.0
                         densities.append(d)
 
-                    max_d = max(densities) if densities else 0
-                    if max_d >= mark_threshold:
-                        sorted_d = sorted(densities, reverse=True)
-                        is_ambiguous = (
-                            len(sorted_d) > 1
-                            and sorted_d[1] > ambiguity_second_min
-                            and (sorted_d[0] - sorted_d[1] < ambiguity_gap_max)
-                            and sorted_d[0] < ambiguity_peak_cap
-                        )
-
-                        if is_ambiguous:
-                            answers[q] = -1
-                        else:
-                            answers[q] = densities.index(max_d)
-                            bubbles_detected += 1
+                    if densities:
+                        m_idx = np.argmax(densities)
+                        m_d = densities[m_idx]
+                        if m_d > 0.15: # Base threshold
+                            avg_others = np.mean([d for i, d in enumerate(densities) if i != m_idx])
+                            # Use relative comparison for robustness
+                            if m_d > avg_others * 1.15 or m_d > 0.30:
+                                answers[q] = int(m_idx)
+                                bubbles_detected += 1
                 
                 result.answers = answers
                 if bubbles_detected == 0:
